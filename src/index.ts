@@ -108,8 +108,15 @@ export function apply(ctx: Context, config: Config) {
   if (config.adminId) {
     ctx.middleware(async (session, next) => {
       try {
-        if (session && session.userId && String(session.userId) === String(config.adminId)) {
-          ;(session as any).authority = Number.MAX_SAFE_INTEGER
+        if (session && session.userId) {
+          const uid = String(session.userId)
+          const admin = String(config.adminId)
+          const uidDigits = uid.replace(/\D/g, '')
+          const adminDigits = admin.replace(/\D/g, '')
+          const matched = uid === admin || uid.endsWith(':' + admin) || uid.endsWith('@qq:' + admin) || uidDigits === adminDigits
+          if (matched) {
+            ;(session as any).authority = Number.MAX_SAFE_INTEGER
+          }
         }
       } catch {
         // ignore
@@ -323,6 +330,19 @@ export function apply(ctx: Context, config: Config) {
         await ctx.database.upsert('steam_bind', [{ ...bind[0], nickname }])
         return session.text('.nickname_set', [nickname])
       })
+
+      // 调试命令：查看当前会话 userId 与权限（便于确认 adminId 是否生效）
+      ctx.command('steam.whoami', '调试：查看当前用户 id 与权限')
+        .action(async ({ session }) => {
+          if (!session) return
+          try {
+            const uid = session.userId
+            const auth = (session as any).authority ?? 'unknown'
+            return session.text?.('.whoami', [String(uid), String(auth)]) || `userId=${uid}, authority=${auth}`
+          } catch (e) {
+            return `error: ${String(e)}`
+          }
+        })
 
     // Scheduler
     let skipFirstBroadcast = config.steamDisableBroadcastOnStartup
