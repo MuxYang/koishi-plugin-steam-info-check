@@ -1,0 +1,30 @@
+{
+  "name": "koishi-plugin-steam-info",
+  "version": "1.0.0",
+  "description": "Steam friends status broadcast plugin for Koishi",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "koishi start"
+  },
+  "keywords": [
+    "koishi",
+    "plugin",
+    "steam",
+    "game"
+  ],
+  "peerDependencies": {
+    "koishi": "^4.16.0",
+    "koishi-plugin-puppeteer": "*"
+  },
+  "dependencies": {
+    "cheerio": "^1.0.0-rc.12",
+    "luxon": "^3.4.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "koishi": "^4.16.0"
+  }
+}
