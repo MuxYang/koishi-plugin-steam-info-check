@@ -77,7 +77,7 @@ export class SteamService extends Service {
             break // Success for this chunk
           }
         } catch (e) {
-          this.ctx.logger('steam').warn(`API key ${key} failed: ${e}`)
+          this.ctx.logger('steam').error(`API key ${key} failed: ${e} EEE`)
         }
       }
     }
@@ -107,7 +107,7 @@ export class SteamService extends Service {
     const recent_2_week_play_time = $('.recentgame_quicklinks.recentgame_recentplaytime > div').text().trim()
 
     const game_data: GameData[] = []
-    $('.recent_game').each((i, el) => {
+    $('.recent_game').each((i: number, el: any) => {
       const game_name = $(el).find('.game_name').text().trim()
       const game_image = $(el).find('.game_capsule').attr('src') || ''
       const details = $(el).find('.game_info_details').text()
@@ -119,7 +119,7 @@ export class SteamService extends Service {
       const last_played = last_played_match ? `最后运行日期：${last_played_match[1]} 日` : '当前正在游戏'
 
       const achievements: Achievement[] = []
-      $(el).find('.game_info_achievement').each((j, achEl) => {
+      $(el).find('.game_info_achievement').each((j: number, achEl: any) => {
         if ($(achEl).hasClass('plus_more')) return
         achievements.push({
           name: $(achEl).attr('data-tooltip-text') || '',

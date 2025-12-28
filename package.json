@@ -1,6 +1,6 @@
 {
-  "name": "@muxyang/koishi-plugin-steam-info",
-  "version": "1.0.0",
+  "name": "koishi-plugin-steam-info-check",
+  "version": "1.1.1",
   "description": "Steam friends status broadcast plugin for Koishi",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

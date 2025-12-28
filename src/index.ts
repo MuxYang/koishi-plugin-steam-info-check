@@ -2,6 +2,7 @@ import { Context, Schema, Logger, Service, Session, h } from 'koishi'
 import { SteamService } from './service'
 import { DrawService } from './drawer'
 import { SteamBind, SteamChannel } from './database'
+import zhCN from './locales/zh-CN'
 
 export const name = 'steam-info'
 export const inject = ['model', 'http', 'puppeteer', 'database']
@@ -12,6 +13,8 @@ export interface Config {
   steamRequestInterval: number
   steamBroadcastType: 'all' | 'part' | 'none'
   steamDisableBroadcastOnStartup: boolean
+  adminId?: string
+  logForwardTarget?: string
   fonts: {
     regular: string
     light: string
@@ -30,11 +33,14 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  steamApiKey: Schema.array(String).required().description('Steam API Key (supports multiple)'),
-  proxy: Schema.string().description('Proxy URL (e.g., http://127.0.0.1:7890)'),
-  steamRequestInterval: Schema.number().default(300).description('Polling interval in seconds'),
-  steamBroadcastType: Schema.union(['all', 'part', 'none']).default('part').description('Broadcast type: all (list), part (gaming only), none (text only)'),
-  steamDisableBroadcastOnStartup: Schema.boolean().default(false).description('Disable broadcast on startup'),
+  steamApiKey: Schema.array(String).required().description('Steam API Key（支持多个）'),
+  proxy: Schema.string().description('代理地址，例如 http://127.0.0.1:7890'),
+  steamRequestInterval: Schema.number().default(300).description('轮询间隔（秒）'),
+  steamBroadcastType: Schema.union(['all', 'part', 'none']).default('part').description('播报类型：all（全部图片列表）、part（仅开始游戏时图片）、none（仅文字）'),
+  startBroadcastType: Schema.union(['list', 'text_image', 'image', 'text']).default('text_image').description('玩家开始游戏时的播报方式：list（整个列表，同 steam.check）、text_image（文字+图片）、image（仅图片）、text（仅文字）'),
+  steamDisableBroadcastOnStartup: Schema.boolean().default(false).description('启动时禁用首次播报（仅预热缓存）'),
+  logForwardTarget: Schema.string().description('将所有日志转发到的目标用户 QQ（可选）'),
+  adminId: Schema.string().description('插件管理员 QQ（拥有最高权限，空表示无）'),
   fonts: Schema.object({
     regular: Schema.string().default('fonts/MiSans-Regular.ttf'),
     light: Schema.string().default('fonts/MiSans-Light.ttf'),
@@ -63,11 +69,54 @@ declare module 'koishi' {
 
 export function apply(ctx: Context, config: Config) {
   // Localization
-  ctx.i18n.define('zh-CN', require('./locales/zh-CN'))
+  ctx.i18n.define('zh-CN', zhCN)
+  ctx.i18n.define('zh', zhCN)
 
   // Services
   ctx.plugin(SteamService, config)
   ctx.plugin(DrawService, config)
+
+  // 日志转发（可选）
+  if (config.logForwardTarget) {
+    const target = config.logForwardTarget
+    const sendToTarget = async (level: string, message: any) => {
+      try {
+        const bots = Object.values(ctx.bots)
+        const bot: any = bots[0]
+        if (!bot) return
+        const text = `[${name}][${level}] ${typeof message === 'string' ? message : JSON.stringify(message)}`
+        await bot.sendMessage(target, text)
+      } catch {
+        // 忽略转发失败，避免影响主流程
+      }
+    }
+
+    const ld: any = logger as any
+    const wrap = (orig: Function, level: string) => (...args: any[]) => {
+      try { orig(...args) } catch {}
+      try { sendToTarget(level, args.map(a => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')) } catch {}
+    }
+
+    ld.debug = wrap(ld.debug?.bind(ld) || (() => {}), 'DEBUG')
+    ld.info = wrap(ld.info?.bind(ld) || (() => {}), 'INFO')
+    ld.warn = wrap(ld.warn?.bind(ld) || (() => {}), 'WARN')
+    ld.error = wrap(ld.error?.bind(ld) || (() => {}), 'ERROR')
+    ;(ld as any).fatal = wrap((ld as any).fatal?.bind(ld) || (() => {}), 'FATAL')
+  }
+
+  // 管理员权限豁免（可选）：在所有会话中提升该 QQ 的权限为最高
+  if (config.adminId) {
+    ctx.middleware(async (session, next) => {
+      try {
+        if (session && session.userId && String(session.userId) === String(config.adminId)) {
+          ;(session as any).authority = Number.MAX_SAFE_INTEGER
+        }
+      } catch {
+        // ignore
+      }
+      return next()
+    })
+  }
 
   // Database
   ctx.model.extend('steam_bind', {
@@ -86,167 +135,337 @@ export function apply(ctx: Context, config: Config) {
     enable: 'boolean',
     name: 'string',
     avatar: 'string',
+    platform: 'string',
+    assignee: 'string',
   }, {
     primary: 'id',
   })
 
-  // Commands
-  ctx.command('steam', 'Steam Information')
+  // Commands and scheduler depend on steam/drawer being ready
+  ctx.using(['steam', 'drawer'], (ctx) => {
+    ctx.command('steam', 'Steam 信息')
 
-  ctx.command('steam.bind <steamId:string>', 'Bind Steam ID', { authority: config.commandAuthority.bind })
-    .alias('steambind', '绑定steam')
-    .action(async ({ session }, steamId) => {
-      if (!session) return
-      if (!steamId || !/^\d+$/.test(steamId)) return session.text('.invalid_id')
-      
-      const targetId = await ctx.steam.getSteamId(steamId)
-      if (!targetId) return session.text('.id_not_found')
+    ctx.command('steam.bind <steamId:string>', '绑定 Steam ID', { authority: config.commandAuthority.bind })
+      .alias('steambind', '绑定steam')
+      .action(async ({ session }, steamId) => {
+        if (!session) return
 
-      await ctx.database.upsert('steam_bind', [
-        {
+        // 如果未提供参数，返回当前已绑定的 Steam ID（若有）
+        if (!steamId) {
+          try {
+            const bind = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
+            if (bind.length) return session.text('.current_bound', [bind[0].steamId])
+            return session.text('.not_bound')
+          } catch (e) {
+            logger.error('查询当前绑定失败：' + String(e) + ' EEE')
+            return session.text('.error')
+          }
+        }
+
+        if (!/^[0-9]+$/.test(steamId)) return session.text('.invalid_id')
+
+        const targetId = await ctx.steam.getSteamId(steamId)
+        if (!targetId) return session.text('.id_not_found')
+
+        // 检查是否已绑定
+        try {
+          const existing = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
+          if (existing.length) {
+            return session.text('.already_bound')
+          }
+        } catch (e) {
+          logger.error('检查已绑定状态失败：' + String(e) + ' EEE')
+        }
+
+        await ctx.database.upsert('steam_bind', [
+          {
+            userId: session.userId,
+            channelId: session.channelId,
+            steamId: targetId,
+          }
+        ], ['userId', 'channelId'])
+
+        return session.text('.bind_success', [targetId])
+      })
+
+    ctx.command('steam.unbind', '解绑 Steam ID', { authority: config.commandAuthority.unbind })
+      .alias('steamunbind', '解绑steam')
+      .action(async ({ session }) => {
+        if (!session) return
+        const result = await ctx.database.remove('steam_bind', {
           userId: session.userId,
           channelId: session.channelId,
-          steamId: targetId,
-        }
-      ], ['userId', 'channelId'])
-
-      return session.text('.bind_success', [targetId])
-    })
-
-  ctx.command('steam.unbind', 'Unbind Steam ID', { authority: config.commandAuthority.unbind })
-    .alias('steamunbind', '解绑steam')
-    .action(async ({ session }) => {
-      if (!session) return
-      const result = await ctx.database.remove('steam_bind', {
-        userId: session.userId,
-        channelId: session.channelId,
+        })
+        return result ? session.text('.unbind_success') : session.text('.not_bound')
       })
-      return result ? session.text('.unbind_success') : session.text('.not_bound')
-    })
 
-  ctx.command('steam.info [target:text]', 'View Steam Profile', { authority: config.commandAuthority.info })
-    .alias('steaminfo', 'steam信息')
-    .action(async ({ session }, target) => {
-      if (!session) return
-      let steamId: string | null = null
-      if (target) {
-        // Check if target is mention
-        const [platform, userId] = session.resolve(target)
-        if (userId) {
-           const bind = await ctx.database.get('steam_bind', { userId, channelId: session.channelId })
-           if (bind.length) steamId = bind[0].steamId
-        } else if (/^\d+$/.test(target)) {
-           steamId = await ctx.steam.getSteamId(target)
-        }
-      } else {
-        const bind = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
-        if (bind.length) steamId = bind[0].steamId
-      }
-
-      if (!steamId) return session.text('.user_not_found')
-
-      const profile = await ctx.steam.getUserData(steamId)
-      const image = await ctx.drawer.drawPlayerStatus(profile, steamId)
-      if (typeof image === 'string') return session.send(image)
-      return session.send(h.image(image, 'image/png'))
-    })
-
-  ctx.command('steam.check', 'Check Friends Status', { authority: config.commandAuthority.check })
-    .alias('steamcheck', '查看steam', '查steam')
-    .action(async ({ session }) => {
-      if (!session) return
-      const binds = await ctx.database.get('steam_bind', { channelId: session.channelId })
-      if (binds.length === 0) return session.text('.no_binds')
-
-      const steamIds = binds.map(b => b.steamId)
-      const summaries = await ctx.steam.getPlayerSummaries(steamIds)
-      
-      if (summaries.length === 0) return session.text('.api_error')
-
-      const channelInfo = await ctx.database.get('steam_channel', { id: session.channelId })
-      const parentAvatar = channelInfo[0]?.avatar 
-        ? Buffer.from(channelInfo[0].avatar, 'base64') 
-        : await ctx.drawer.getDefaultAvatar()
-      const parentName = channelInfo[0]?.name || session.channelId || 'Unknown'
-
-      const image = await ctx.drawer.drawFriendsStatus(parentAvatar, parentName, summaries, binds)
-      if (typeof image === 'string') return session.send(image)
-      return session.send(h.image(image, 'image/png'))
-    })
-
-  ctx.command('steam.enable', 'Enable Broadcast', { authority: config.commandAuthority.enable })
-    .alias('steamenable', '启用steam')
-    .action(async ({ session }) => {
-      if (!session) return
-      await ctx.database.upsert('steam_channel', [{ id: session.channelId, enable: true }])
-      return session.text('.enable_success')
-    })
-
-  ctx.command('steam.disable', 'Disable Broadcast', { authority: config.commandAuthority.disable })
-    .alias('steamdisable', '禁用steam')
-    .action(async ({ session }) => {
-      if (!session) return
-      await ctx.database.upsert('steam_channel', [{ id: session.channelId, enable: false }])
-      return session.text('.disable_success')
-    })
-  
-  ctx.command('steam.update [name:string] [avatar:image]', 'Update Group Info', { authority: config.commandAuthority.update })
-    .alias('steamupdate', '更新群信息')
-    .action(async ({ session }, name, avatar) => {
+    ctx.command('steam.info [target:text]', '查看 Steam 资料', { authority: config.commandAuthority.info })
+      .alias('steaminfo', 'steam信息')
+      .action(async ({ session }, target) => {
         if (!session) return
-        const img = session.elements && session.elements.find(e => e.type === 'img')
-        const imgUrl = img?.attrs?.src
-        
-        let avatarBase64 = null
-        if (imgUrl) {
-            const buffer = await ctx.http.get(imgUrl, { responseType: 'arraybuffer' })
-            avatarBase64 = Buffer.from(buffer).toString('base64')
+        try {
+          let steamId: string | null = null
+          if (target) {
+            try {
+              const [, userId] = session.resolve(target)
+              if (userId) {
+                const bind = await ctx.database.get('steam_bind', { userId, channelId: session.channelId })
+                if (bind.length) steamId = bind[0].steamId
+              }
+            } catch {
+              /* ignore resolve errors */
+            }
+
+            if (!steamId && /^\d+$/.test(target)) {
+              steamId = await ctx.steam.getSteamId(target)
+            }
+          } else {
+            const bind = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
+            if (bind.length) steamId = bind[0].steamId
+          }
+
+          if (!steamId) return session.text('.user_not_found')
+
+          const profile = await ctx.steam.getUserData(steamId)
+          const image = await ctx.drawer.drawPlayerStatus(profile, steamId)
+          if (typeof image === 'string') return image
+          return h.image(image, 'image/png')
+        } catch (err) {
+          logger.error(err)
+          return session.text('.error')
         }
+      })
 
-        if (!name && !avatarBase64) return session.text('.args_missing')
+    ctx.command('steam.check', '查看好友在线状态', { authority: config.commandAuthority.check })
+      .alias('steamcheck', '查看steam', '查steam')
+      .action(async ({ session }) => {
+        if (!session) return
+        try {
+          const binds = await ctx.database.get('steam_bind', { channelId: session.channelId })
+          if (binds.length === 0) return session.text('.no_binds')
 
-        const update: any = { id: session.channelId }
-        if (name) update.name = name
-        if (avatarBase64) update.avatar = avatarBase64
+          const steamIds = binds.map(b => b.steamId)
+          const summaries = await ctx.steam.getPlayerSummaries(steamIds)
+          
+          if (summaries.length === 0) return session.text('.api_error')
+
+          const channelInfo = await ensureChannelMeta(ctx, session)
+          const parentAvatar = channelInfo.avatar 
+            ? Buffer.from(channelInfo.avatar, 'base64') 
+            : await ctx.drawer.getDefaultAvatar()
+          const parentName = channelInfo.name || session.channelId || 'Unknown'
+
+          const image = await ctx.drawer.drawFriendsStatus(parentAvatar, parentName, summaries, binds)
+          if (typeof image === 'string') return image
+          return h.image(image, 'image/png')
+        } catch (err) {
+          logger.error(err)
+          return session.text('.error')
+        }
+      })
+
+    ctx.command('steam.enable', '启用播报', { authority: config.commandAuthority.enable })
+      .alias('steamenable', '启用steam')
+      .action(async ({ session }) => {
+        if (!session) return
+        await ctx.database.upsert('steam_channel', [{
+          id: session.channelId,
+          enable: true,
+          platform: session.platform,
+          assignee: session.selfId,
+        }])
+        return session.text('.enable_success')
+      })
+
+    ctx.command('steam.disable', '禁用播报', { authority: config.commandAuthority.disable })
+      .alias('steamdisable', '禁用steam')
+      .action(async ({ session }) => {
+        if (!session) return
+        await ctx.database.upsert('steam_channel', [{
+          id: session.channelId,
+          enable: false,
+          platform: session.platform,
+          assignee: session.selfId,
+        }])
+        return session.text('.disable_success')
+      })
+    
+    ctx.command('steam.update [name:string] [avatar:image]', '更新群信息', { authority: config.commandAuthority.update })
+      .alias('steamupdate', '更新群信息')
+      .action(async ({ session }, name, avatar) => {
+          if (!session) return
+          const img = session.elements && session.elements.find(e => e.type === 'img')
+          const imgUrl = img?.attrs?.src
+          
+          let avatarBase64 = null
+          if (imgUrl) {
+              const buffer = await ctx.http.get(imgUrl, { responseType: 'arraybuffer' })
+              avatarBase64 = Buffer.from(buffer).toString('base64')
+          }
+
+          if (!name && !avatarBase64) return session.text('.args_missing')
+
+          const update: any = { id: session.channelId, platform: session.platform, assignee: session.selfId }
+          if (name) update.name = name
+          if (avatarBase64) update.avatar = avatarBase64
+          
+          await ctx.database.upsert('steam_channel', [update])
+          return session.text('.update_success')
+      })
+
+    ctx.command('steam.nickname <nickname:string>', '设置 Steam 昵称', { authority: config.commandAuthority.nickname })
+      .alias('steamnickname', 'steam昵称')
+      .action(async ({ session }, nickname) => {
+        if (!session) return
+        const bind = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
+        if (!bind.length) return session.text('.not_bound')
         
-        await ctx.database.upsert('steam_channel', [update])
-        return session.text('.update_success')
-    })
+        await ctx.database.upsert('steam_bind', [{ ...bind[0], nickname }])
+        return session.text('.nickname_set', [nickname])
+      })
 
-  ctx.command('steam.nickname <nickname:string>', 'Set Steam Nickname', { authority: config.commandAuthority.nickname })
-    .alias('steamnickname', 'steam昵称')
-    .action(async ({ session }, nickname) => {
-      if (!session) return
-      const bind = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
-      if (!bind.length) return session.text('.not_bound')
-      
-      await ctx.database.upsert('steam_bind', [{ ...bind[0], nickname }])
-      return session.text('.nickname_set', [nickname])
-    })
-
-  // Scheduler
-  ctx.setInterval(async () => {
-    await broadcast(ctx)
-  }, config.steamRequestInterval * 1000)
+    // Scheduler
+    let skipFirstBroadcast = config.steamDisableBroadcastOnStartup
+    ctx.setInterval(async () => {
+      if (skipFirstBroadcast) {
+        await seedStatusCache(ctx)
+        skipFirstBroadcast = false
+        return
+      }
+      await broadcast(ctx, config)
+    }, config.steamRequestInterval * 1000)
+  })
 }
 
 // Broadcast Logic
 const statusCache = new Map<string, any>()
 
-async function broadcast(ctx: Context) {
-  const channels = await ctx.database.get('steam_channel', { enable: true })
+async function ensureChannelMeta(ctx: Context, session: Session) {
+  const channelId = session.channelId
+  const existing = await ctx.database.get('steam_channel', { id: channelId })
+  const current = existing[0] || { id: channelId, enable: true, platform: session.platform, assignee: session.selfId }
+
+  let name = current.name
+  if (!name && session.event?.channel?.name) {
+    name = session.event.channel.name
+  }
+  // OneBot 群名补充
+  if (!name && session.platform?.includes('onebot') && session.bot?.internal?.getGroupInfo) {
+    // 先尝试原始（primitive）参数，许多 adapter/napcat 期望直接的字符串或数字
+    const primitiveVariants = [channelId, Number(channelId)]
+    for (const arg of primitiveVariants) {
+      try {
+        logger.error(`getGroupInfo 尝试 args=${JSON.stringify(arg)}`)
+        const info = await session.bot.internal.getGroupInfo(arg as any)
+        logger.error(`getGroupInfo 返回: ${JSON.stringify(info)}`)
+        if (info) {
+          if ((info as any).group_name) { name = (info as any).group_name; break }
+          if ((info as any).data && (info as any).data.group_name) { name = (info as any).data.group_name; break }
+          if ((info as any).data && (info as any).data.group && (info as any).data.group.group_name) { name = (info as any).data.group.group_name; break }
+          if ((info as any).ret && (info as any).ret.data && (info as any).ret.data.group_name) { name = (info as any).ret.data.group_name; break }
+        }
+      } catch (err) {
+        logger.error('getGroupInfo 原始参数调用失败，arg=' + JSON.stringify(arg) + '，错误：' + String(err) + ' EEE')
+        if (err && (err as any).message) {
+          logger.error('getGroupInfo 原始错误信息: ' + String((err as any).message))
+        }
+      }
+    }
+
+    // 如果 primitive 未成功，再尝试对象参数包裹形式
+    if (!name) {
+      const argVariants = [
+        { group_id: channelId },
+        { group_id: { group_id: channelId } },
+        { group_id: Number(channelId) },
+        { group_id: { group_id: Number(channelId) } },
+      ]
+      for (const args of argVariants) {
+        try {
+          logger.error(`getGroupInfo 尝试 args=${JSON.stringify(args)}`)
+          const info = await session.bot.internal.getGroupInfo(args)
+          logger.error(`getGroupInfo 返回: ${JSON.stringify(info)}`)
+
+          if (!info) continue
+
+          if ((info as any).group_name) { name = (info as any).group_name; break }
+          if ((info as any).data && (info as any).data.group_name) { name = (info as any).data.group_name; break }
+          if ((info as any).data && (info as any).data.group && (info as any).data.group.group_name) { name = (info as any).data.group.group_name; break }
+          if ((info as any).ret && (info as any).ret.data && (info as any).ret.data.group_name) { name = (info as any).ret.data.group_name; break }
+
+          logger.error('getGroupInfo 返回了未识别结构（尝试 参数：' + JSON.stringify(args) + '）: ' + JSON.stringify(info) + ' EEE')
+        } catch (err) {
+          try {
+            logger.error('getGroupInfo 调用失败，args=' + JSON.stringify(args) + '，错误：' + String(err) + ' EEE')
+            if (err && (err as any).message) {
+              logger.error('getGroupInfo 原始错误信息: ' + String((err as any).message))
+            }
+          } catch (e) {
+            logger.error('getGroupInfo 调用失败但记录 args 时出错：' + String(e) + ' EEE')
+          }
+        }
+      }
+    }
+
+    // 所有尝试失败，记录最终失败并使用回退值
+    if (!name) {
+      logger.error('getGroupInfo 所有尝试均失败，使用回退群名: ' + channelId + ' EEE')
+      name = channelId
+    }
+  }
+
+  let avatar = current.avatar
+  if (!avatar) {
+    try {
+      // For QQ group avatars
+      const url = `http://p.qlogo.cn/gh/${channelId}/${channelId}/0`
+      const buffer = await ctx.http.get(url, { responseType: 'arraybuffer' })
+      avatar = Buffer.from(buffer).toString('base64')
+    } catch {
+      // fallback later to default avatar
+    }
+  }
+
+  const update: any = { id: channelId, platform: session.platform, assignee: session.selfId }
+  if (name) update.name = name
+  if (avatar) update.avatar = avatar
+  await ctx.database.upsert('steam_channel', [update])
+
+  return { ...current, ...update }
+}
+
+async function seedStatusCache(ctx: Context) {
+  const binds = await ctx.database.get('steam_bind', {})
+  logger.error(`seedStatusCache: load binds count=${binds.length}`)
+  if (!binds.length) return
+  const steamIds = [...new Set(binds.map(b => b.steamId))]
+  const summaries = await ctx.steam.getPlayerSummaries(steamIds)
+  logger.error(`seedStatusCache: fetched summaries=${summaries.length}`)
+  for (const player of summaries) {
+    statusCache.set(player.steamid, player)
+  }
+}
+
+async function broadcast(ctx: Context, config: Config) {
+  try {
+    const channels = await ctx.database.get('steam_channel', { enable: true })
+    logger.error(`broadcast: enabled channels=${channels.length}`)
   if (channels.length === 0) return
 
-  const channelIds = channels.map(c => c.id)
+    const channelIds = channels.map(c => c.id)
   const binds = await ctx.database.get('steam_bind', { channelId: channelIds })
+    logger.error(`broadcast: binds total=${binds.length}`)
   if (binds.length === 0) return
 
   const steamIds = [...new Set(binds.map(b => b.steamId))]
-  
-  const currentSummaries = await ctx.steam.getPlayerSummaries(steamIds)
+    logger.error(`broadcast: unique steamIds=${steamIds.length}`)
+
+    const currentSummaries = await ctx.steam.getPlayerSummaries(steamIds)
+    logger.error(`broadcast: fetched summaries=${currentSummaries.length}`)
   const currentMap = new Map(currentSummaries.map(p => [p.steamid, p]))
 
   for (const channel of channels) {
+      logger.error(`broadcast: channel=${channel.id} processing`)
     const channelBinds = binds.filter(b => b.channelId === channel.id)
     const msgs: string[] = []
     const startGamingPlayers: any[] = []
@@ -263,42 +482,84 @@ async function broadcast(ctx: Context) {
       const newGame = current.gameextrainfo
       const name = bind.nickname || current.personaname
 
+      // 只在玩家开始游戏或从一个游戏切换到另一个游戏时推送
       if (newGame && !oldGame) {
         msgs.push(`${name} 开始玩 ${newGame} 了`)
         startGamingPlayers.push({ ...current, nickname: bind.nickname })
-      } else if (!newGame && oldGame) {
-        msgs.push(`${name} 玩了 ${oldGame} 后不玩了`)
       } else if (newGame && oldGame && newGame !== oldGame) {
         msgs.push(`${name} 停止玩 ${oldGame}，开始玩 ${newGame} 了`)
       }
     }
 
     if (msgs.length > 0) {
-        const bot = ctx.bots[0]
-        if (!bot) continue
+      logger.error(`broadcast: channel=${channel.id} msgs=${msgs.length}`)
+      const botKey = channel.platform && channel.assignee ? `${channel.platform}:${channel.assignee}` : undefined
+      const bot = botKey ? ctx.bots[botKey] : Object.values(ctx.bots)[0]
+      if (!bot) continue
 
-        if (ctx.config.steamBroadcastType === 'none') {
+      // 简化逻辑：steamBroadcastType 控制是否展示图片（all/part/none）
+      const broadcastType = config.steamBroadcastType || 'part'
+      const startMode = (config as any).startBroadcastType || 'text_image'
+
+      // 如果为 none，始终仅文字
+      if (broadcastType === 'none') {
+        await bot.sendMessage(channel.id, msgs.join('\n'))
+      } else if (broadcastType === 'all') {
+        // all：优先展示整个频道的状态图（同 steam.check），若失败则回退文字
+        try {
+          const channelPlayers = channelBinds.map(b => currentMap.get(b.steamId)).filter(Boolean) as any[]
+          const parentAvatar = channel.avatar ? Buffer.from(channel.avatar, 'base64') : await ctx.drawer.getDefaultAvatar()
+          const image = await ctx.drawer.drawFriendsStatus(parentAvatar, channel.name || channel.id, channelPlayers, channelBinds)
+          if (image) {
+            const img = typeof image === 'string' ? image : h.image(image, 'image/png')
+            await bot.sendMessage(channel.id, msgs.join('\n') + img)
+          } else {
             await bot.sendMessage(channel.id, msgs.join('\n'))
-        } else if (ctx.config.steamBroadcastType === 'part') {
-            if (startGamingPlayers.length > 0) {
-                const images = await Promise.all(startGamingPlayers.map(p => ctx.drawer.drawStartGaming(p, p.nickname)))
-                const combined = await ctx.drawer.concatImages(images)
-                const img = combined ? (typeof combined === 'string' ? combined : h.image(combined, 'image/png')) : ''
-                await bot.sendMessage(channel.id, msgs.join('\n') + img)
-            } else {
-                await bot.sendMessage(channel.id, msgs.join('\n'))
-            }
-        } else if (ctx.config.steamBroadcastType === 'all') {
+          }
+        } catch (e) {
+          logger.error('broadcast draw full list failed: ' + String(e) + ' EEE')
+          await bot.sendMessage(channel.id, msgs.join('\n'))
+        }
+      } else {
+        // part：仅在有开始游戏的玩家时按 startBroadcastType 决定格式，否则仅文字
+        if (startGamingPlayers.length > 0) {
+          if (startMode === 'list') {
             const channelPlayers = channelBinds.map(b => currentMap.get(b.steamId)).filter(Boolean) as any[]
             const parentAvatar = channel.avatar ? Buffer.from(channel.avatar, 'base64') : await ctx.drawer.getDefaultAvatar()
             const image = await ctx.drawer.drawFriendsStatus(parentAvatar, channel.name || channel.id, channelPlayers, channelBinds)
-            const img = image ? (typeof image === 'string' ? image : h.image(image, 'image/png')) : ''
+            if (image) {
+              const img = typeof image === 'string' ? image : h.image(image, 'image/png')
+              await bot.sendMessage(channel.id, msgs.join('\n') + img)
+            } else {
+              await bot.sendMessage(channel.id, msgs.join('\n'))
+            }
+          } else if (startMode === 'text_image') {
+            const images = await Promise.all(startGamingPlayers.map(p => ctx.drawer.drawStartGaming(p, p.nickname)))
+            const combined = await ctx.drawer.concatImages(images)
+            const img = combined ? (typeof combined === 'string' ? combined : h.image(combined, 'image/png')) : ''
             await bot.sendMessage(channel.id, msgs.join('\n') + img)
+          } else if (startMode === 'image') {
+            const images = await Promise.all(startGamingPlayers.map(p => ctx.drawer.drawStartGaming(p, p.nickname)))
+            const combined = await ctx.drawer.concatImages(images)
+            const img = combined ? (typeof combined === 'string' ? combined : h.image(combined, 'image/png')) : ''
+            if (img) await bot.sendMessage(channel.id, img)
+            else await bot.sendMessage(channel.id, msgs.join('\n'))
+          } else {
+            // text
+            await bot.sendMessage(channel.id, msgs.join('\n'))
+          }
+        } else {
+          await bot.sendMessage(channel.id, msgs.join('\n'))
         }
+      }
     }
   }
 
+  // 广播完成后更新缓存
   for (const p of currentSummaries) {
-      statusCache.set(p.steamid, p)
+    statusCache.set(p.steamid, p)
   }
+} catch (err) {
+  logger.error('broadcast 发生异常：' + String(err) + ' EEE')
+}
 }

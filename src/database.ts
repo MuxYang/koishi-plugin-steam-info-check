@@ -11,6 +11,8 @@ export interface SteamChannel {
   enable: boolean
   name?: string
   avatar?: string
+  platform?: string
+  assignee?: string
 }
 
 declare module 'koishi' {
