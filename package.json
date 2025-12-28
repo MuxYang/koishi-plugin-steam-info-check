@@ -12,8 +12,34 @@
     "koishi",
     "plugin",
     "steam",
-    "game"
+    "game",
+    "bot",
+    "chatbot"
   ],
+  "author": "MuxYang <tlnkmc.b@gmail.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/MuxYang/koishi-plugin-steam-info",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MuxYang/koishi-plugin-steam-info.git"
+  },
+  "bugs": {
+    "url": "https://github.com/MuxYang/koishi-plugin-steam-info/issues"
+  },
+  "koishi": {
+    "description": {
+      "en": "Steam friends status broadcast plugin for Koishi",
+      "zh-CN": "Koishi 的 Steam 好友状态播报插件"
+    },
+    "service": {
+      "required": [
+        "model",
+        "http",
+        "puppeteer",
+        "database"
+      ]
+    }
+  },
   "peerDependencies": {
     "koishi": "^4.16.0",
     "koishi-plugin-puppeteer": "*"
