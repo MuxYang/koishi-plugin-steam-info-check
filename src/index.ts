@@ -443,7 +443,8 @@ async function broadcast(ctx: Context, config: Config) {
         msgs.push(`${name} 开始玩 ${newGame} 了`)
         startGamingPlayers.push({ ...current, nickname: bind.nickname })
       } else if (newGame && oldGame && newGame !== oldGame) {
-        msgs.push(`${name} 停止玩 ${oldGame}，开始玩 ${newGame} 了`)
+        // 游戏切换视同开始：不要发停止/开始的文字，改为把玩家加入开始列表，后面按图片发送
+        startGamingPlayers.push({ ...current, nickname: bind.nickname })
       }
     }
 
@@ -498,16 +499,33 @@ async function broadcast(ctx: Context, config: Config) {
               await bot.sendMessage(channel.id, msgs.join('\n'))
             }
           } else if (startMode === 'text_image') {
-            const images = await Promise.all(startGamingPlayers.map(p => ctx.drawer.drawStartGaming(p, p.nickname)))
-            const combined = await ctx.drawer.concatImages(images)
-            const img = combined ? (typeof combined === 'string' ? combined : h.image(combined, 'image/png')) : ''
-            await bot.sendMessage(channel.id, msgs.join('\n') + img)
+            // 先发送文字（如果有），然后逐个发送玩家图片，每张图片间隔 4-10s
+            if (msgs.length > 0) await bot.sendMessage(channel.id, msgs.join('\n'))
+            for (const p of startGamingPlayers) {
+              try {
+                const imgBuf = await ctx.drawer.drawStartGaming(p, p.nickname)
+                const img = imgBuf ? (typeof imgBuf === 'string' ? imgBuf : h.image(imgBuf, 'image/png')) : ''
+                if (img) await bot.sendMessage(channel.id, img)
+              } catch (e) {
+                logger.error('broadcast drawStartGaming failed: ' + String(e) + ' EEE')
+              }
+              // 随机延迟 4-10 秒
+              const delay = Math.floor(Math.random() * (10000 - 4000 + 1)) + 4000
+              await new Promise(res => setTimeout(res, delay))
+            }
           } else if (startMode === 'image') {
-            const images = await Promise.all(startGamingPlayers.map(p => ctx.drawer.drawStartGaming(p, p.nickname)))
-            const combined = await ctx.drawer.concatImages(images)
-            const img = combined ? (typeof combined === 'string' ? combined : h.image(combined, 'image/png')) : ''
-            if (img) await bot.sendMessage(channel.id, img)
-            else await bot.sendMessage(channel.id, msgs.join('\n'))
+            // 仅图片：逐个发送每位玩家的图片，图片间隔 4-10s
+            for (const p of startGamingPlayers) {
+              try {
+                const imgBuf = await ctx.drawer.drawStartGaming(p, p.nickname)
+                const img = imgBuf ? (typeof imgBuf === 'string' ? imgBuf : h.image(imgBuf, 'image/png')) : ''
+                if (img) await bot.sendMessage(channel.id, img)
+              } catch (e) {
+                logger.error('broadcast drawStartGaming failed: ' + String(e) + ' EEE')
+              }
+              const delay = Math.floor(Math.random() * (10000 - 4000 + 1)) + 4000
+              await new Promise(res => setTimeout(res, delay))
+            }
           } else {
             // text
             await bot.sendMessage(channel.id, msgs.join('\n'))
