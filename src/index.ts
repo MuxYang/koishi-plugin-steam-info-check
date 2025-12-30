@@ -278,11 +278,9 @@ export function apply(ctx: Context, config: Config) {
         return session.text('.nickname_set', [nickname])
       })
 
-      // (已移除) 调试命令 steam.whoami 已删除以避免缺失的 i18n 警告
-
     // Scheduler
     let skipFirstBroadcast = config.steamDisableBroadcastOnStartup
-    ctx.setInterval(async () => {
+    const timer = ctx.setInterval(async () => {
       if (skipFirstBroadcast) {
         await seedStatusCache(ctx)
         skipFirstBroadcast = false
@@ -290,11 +288,22 @@ export function apply(ctx: Context, config: Config) {
       }
       await broadcast(ctx, config)
     }, config.steamRequestInterval * 1000)
+
+    ctx.on('dispose', () => {
+      try { clearInterval(timer as unknown as NodeJS.Timeout) } catch {}
+    })
   })
 }
 
 // Broadcast Logic
 const statusCache = new Map<string, any>()
+// playMeta stores per-player metadata to help decide whether a resumed play should be
+// considered a "start" (e.g., play A -> offline -> play A within 10 minutes should be ignored)
+const playMeta = new Map<string, { lastLeftAt?: number, lastLeftGame?: string }>()
+// lastSeenAt records the last timestamp we observed a steamid in player summaries.
+const lastSeenAt = new Map<string, number>()
+// TTL for stale entries (default 7 days). Entries not seen for longer than this will be pruned.
+const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 async function ensureChannelMeta(ctx: Context, session: Session) {
   const channelId = session.channelId
@@ -399,6 +408,7 @@ async function seedStatusCache(ctx: Context) {
   logger.error(`seedStatusCache: fetched summaries=${summaries.length}`)
   for (const player of summaries) {
     statusCache.set(player.steamid, player)
+    lastSeenAt.set(player.steamid, Date.now())
   }
 }
 
@@ -426,25 +436,67 @@ async function broadcast(ctx: Context, config: Config) {
     const msgs: string[] = []
     const startGamingPlayers: any[] = []
 
+    const now = Date.now()
     for (const bind of channelBinds) {
-      const current = currentMap.get(bind.steamId)
-      const old = statusCache.get(bind.steamId)
-      
-      if (!current) continue
-      
-      if (!old) continue 
+      const steamid = bind.steamId
+      const current = currentMap.get(steamid)
+      const old = statusCache.get(steamid)
 
-      const oldGame = old.gameextrainfo
-      const newGame = current.gameextrainfo
+      if (!current) continue
+
+      // If no previous cached summary, skip change detection for this round
+      if (!old) {
+        continue
+      }
+
+      const oldGame = old.gameextrainfo || null
+      const newGame = current.gameextrainfo || null
       const name = bind.nickname || current.personaname
 
-      // 只在玩家开始游戏或从一个游戏切换到另一个游戏时推送
+      const meta = playMeta.get(steamid) || {}
+
+      // Player started playing (was not playing before)
       if (newGame && !oldGame) {
+        // If previously left same game and rejoined within 10 minutes, ignore as restart
+        if (meta.lastLeftAt && meta.lastLeftGame === newGame) {
+          const delta = now - meta.lastLeftAt
+          if (delta < 10 * 60 * 1000) {
+            // treat as resume within grace period -> do nothing
+            // clear lastLeft info to avoid repeated ignores
+            meta.lastLeftAt = undefined
+            meta.lastLeftGame = undefined
+            playMeta.set(steamid, meta)
+          } else {
+            // left long ago -> treat as new start
+            msgs.push(`${name} 开始玩 ${newGame} 了`)
+            startGamingPlayers.push({ ...current, nickname: bind.nickname })
+            meta.lastLeftAt = undefined
+            meta.lastLeftGame = undefined
+            playMeta.set(steamid, meta)
+          }
+        } else {
+          // no previous left info -> treat as normal start
+          msgs.push(`${name} 开始玩 ${newGame} 了`)
+          startGamingPlayers.push({ ...current, nickname: bind.nickname })
+          meta.lastLeftAt = undefined
+          meta.lastLeftGame = undefined
+          playMeta.set(steamid, meta)
+        }
+
+      // Player switched games: treat as start of new game (always notify)
+      } else if (newGame && oldGame && newGame !== oldGame) {
         msgs.push(`${name} 开始玩 ${newGame} 了`)
         startGamingPlayers.push({ ...current, nickname: bind.nickname })
-      } else if (newGame && oldGame && newGame !== oldGame) {
-        // 游戏切换视同开始：不要发停止/开始的文字，改为把玩家加入开始列表，后面按图片发送
-        startGamingPlayers.push({ ...current, nickname: bind.nickname })
+        // clear any left metadata
+        meta.lastLeftAt = undefined
+        meta.lastLeftGame = undefined
+        playMeta.set(steamid, meta)
+
+      // Player stopped playing: record left timestamp and game
+      } else if (!newGame && oldGame) {
+        meta.lastLeftAt = now
+        meta.lastLeftGame = oldGame
+        playMeta.set(steamid, meta)
       }
     }
 
@@ -540,6 +592,19 @@ async function broadcast(ctx: Context, config: Config) {
   // 广播完成后更新缓存
   for (const p of currentSummaries) {
     statusCache.set(p.steamid, p)
+  }
+  // 更新 lastSeenAt 并清理长期未见的条目，防止内存无限增长
+  const now = Date.now()
+  for (const p of currentSummaries) {
+    lastSeenAt.set(p.steamid, now)
+  }
+  for (const [id, ts] of Array.from(lastSeenAt.entries())) {
+    if (now - ts > STALE_TTL_MS) {
+      lastSeenAt.delete(id)
+      statusCache.delete(id)
+      playMeta.delete(id)
+      logger.error(`prune stale player data: ${id}`)
+    }
   }
 } catch (err) {
   logger.error('broadcast 发生异常：' + String(err) + ' EEE')
