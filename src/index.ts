@@ -119,7 +119,7 @@ export function apply(ctx: Context, config: Config) {
             return session.text('.already_bound')
           }
         } catch (e) {
-          logger.error('检查已绑定状态失败：' + String(e) + ' EEE')
+          logger.error('检查已绑定状态失败：' + String(e))
         }
 
         await ctx.database.upsert('steam_bind', [
@@ -322,7 +322,7 @@ async function ensureChannelMeta(ctx: Context, session: Session) {
           if ((info as any).ret && (info as any).ret.data && (info as any).ret.data.group_name) { name = (info as any).ret.data.group_name; break }
         }
       } catch (err) {
-        logger.error('getGroupInfo 原始参数调用失败，arg=' + JSON.stringify(arg) + '，错误：' + String(err) + ' EEE')
+        logger.error('getGroupInfo 原始参数调用失败，arg=' + JSON.stringify(arg) + '，错误：' + String(err))
         if (err && (err as any).message) {
           logger.error('getGroupInfo 原始错误信息: ' + String((err as any).message))
         }
@@ -350,15 +350,15 @@ async function ensureChannelMeta(ctx: Context, session: Session) {
           if ((info as any).data && (info as any).data.group && (info as any).data.group.group_name) { name = (info as any).data.group.group_name; break }
           if ((info as any).ret && (info as any).ret.data && (info as any).ret.data.group_name) { name = (info as any).ret.data.group_name; break }
 
-          logger.error('getGroupInfo 返回了未识别结构（尝试 参数：' + JSON.stringify(args) + '）: ' + JSON.stringify(info) + ' EEE')
+          logger.error('getGroupInfo 返回了未识别结构（尝试 参数：' + JSON.stringify(args) + '）: ' + JSON.stringify(info))
         } catch (err) {
           try {
-            logger.error('getGroupInfo 调用失败，args=' + JSON.stringify(args) + '，错误：' + String(err) + ' EEE')
+            logger.error('getGroupInfo 调用失败，args=' + JSON.stringify(args) + '，错误：' + String(err))
             if (err && (err as any).message) {
               logger.error('getGroupInfo 原始错误信息: ' + String((err as any).message))
             }
           } catch (e) {
-            logger.error('getGroupInfo 调用失败但记录 args 时出错：' + String(e) + ' EEE')
+            logger.error('getGroupInfo 调用失败但记录 args 时出错：' + String(e))
           }
         }
       }
@@ -366,7 +366,7 @@ async function ensureChannelMeta(ctx: Context, session: Session) {
 
     // 所有尝试失败，记录最终失败并使用回退值
     if (!name) {
-      logger.error('getGroupInfo 所有尝试均失败，使用回退群名: ' + channelId + ' EEE')
+      logger.error('getGroupInfo 所有尝试均失败，使用回退群名: ' + channelId)
       name = channelId
     }
   }
@@ -393,11 +393,11 @@ async function ensureChannelMeta(ctx: Context, session: Session) {
 
 async function seedStatusCache(ctx: Context) {
   const binds = await ctx.database.get('steam_bind', {})
-  logger.error(`seedStatusCache: load binds count=${binds.length}`)
+  logger.info(`seedStatusCache: load binds count=${binds.length}`)
   if (!binds.length) return
   const steamIds = [...new Set(binds.map(b => b.steamId))]
   const summaries = await ctx.steam.getPlayerSummaries(steamIds)
-  logger.error(`seedStatusCache: fetched summaries=${summaries.length}`)
+  logger.info(`seedStatusCache: fetched summaries=${summaries.length}`)
   for (const player of summaries) {
     statusCache.set(player.steamid, player)
     lastSeenAt.set(player.steamid, Date.now())
@@ -407,23 +407,23 @@ async function seedStatusCache(ctx: Context) {
 async function broadcast(ctx: Context, config: Config) {
   try {
     const channels = await ctx.database.get('steam_channel', { enable: true })
-    logger.error(`broadcast: enabled channels=${channels.length}`)
+    logger.info(`broadcast: enabled channels=${channels.length}`)
   if (channels.length === 0) return
 
     const channelIds = channels.map(c => c.id)
   const binds = await ctx.database.get('steam_bind', { channelId: channelIds })
-    logger.error(`broadcast: binds total=${binds.length}`)
+    logger.info(`broadcast: binds total=${binds.length}`)
   if (binds.length === 0) return
 
   const steamIds = [...new Set(binds.map(b => b.steamId))]
-    logger.error(`broadcast: unique steamIds=${steamIds.length}`)
+    logger.info(`broadcast: unique steamIds=${steamIds.length}`)
 
     const currentSummaries = await ctx.steam.getPlayerSummaries(steamIds)
-    logger.error(`broadcast: fetched summaries=${currentSummaries.length}`)
+    logger.info(`broadcast: fetched summaries=${currentSummaries.length}`)
   const currentMap = new Map(currentSummaries.map(p => [p.steamid, p]))
 
   for (const channel of channels) {
-      logger.error(`broadcast: channel=${channel.id} processing`)
+      logger.debug(`broadcast: channel=${channel.id} processing`)
     const channelBinds = binds.filter(b => b.channelId === channel.id)
     const msgs: string[] = []
     const startGamingPlayers: any[] = []
@@ -493,7 +493,7 @@ async function broadcast(ctx: Context, config: Config) {
     }
 
     if (msgs.length > 0) {
-      logger.error(`broadcast: channel=${channel.id} msgs=${msgs.length}`)
+      logger.debug(`broadcast: channel=${channel.id} msgs=${msgs.length}`)
       const botKey = channel.platform && channel.assignee ? `${channel.platform}:${channel.assignee}` : undefined
       const bot = botKey ? ctx.bots[botKey] : Object.values(ctx.bots)[0]
       if (!bot) continue
@@ -526,7 +526,7 @@ async function broadcast(ctx: Context, config: Config) {
             await bot.sendMessage(channel.id, msgs.join('\n'))
           }
         } catch (e) {
-          logger.error('broadcast draw full list failed: ' + String(e) + ' EEE')
+          logger.error('broadcast draw full list failed: ' + String(e))
           await bot.sendMessage(channel.id, msgs.join('\n'))
         }
       } else {
@@ -551,7 +551,7 @@ async function broadcast(ctx: Context, config: Config) {
                 const img = imgBuf ? (typeof imgBuf === 'string' ? imgBuf : h.image(imgBuf, 'image/png')) : ''
                 if (img) await bot.sendMessage(channel.id, img)
               } catch (e) {
-                logger.error('broadcast drawStartGaming failed: ' + String(e) + ' EEE')
+                logger.error('broadcast drawStartGaming failed: ' + String(e))
               }
               // 随机延迟 4-10 秒
               const delay = Math.floor(Math.random() * (10000 - 4000 + 1)) + 4000
@@ -565,7 +565,7 @@ async function broadcast(ctx: Context, config: Config) {
                 const img = imgBuf ? (typeof imgBuf === 'string' ? imgBuf : h.image(imgBuf, 'image/png')) : ''
                 if (img) await bot.sendMessage(channel.id, img)
               } catch (e) {
-                logger.error('broadcast drawStartGaming failed: ' + String(e) + ' EEE')
+                logger.error('broadcast drawStartGaming failed: ' + String(e))
               }
               const delay = Math.floor(Math.random() * (10000 - 4000 + 1)) + 4000
               await new Promise(res => setTimeout(res, delay))
@@ -595,10 +595,10 @@ async function broadcast(ctx: Context, config: Config) {
       lastSeenAt.delete(id)
       statusCache.delete(id)
       playMeta.delete(id)
-      logger.error(`prune stale player data: ${id}`)
+      logger.info(`prune stale player data: ${id}`)
     }
   }
 } catch (err) {
-  logger.error('broadcast 发生异常：' + String(err) + ' EEE')
+  logger.error('broadcast 发生异常：' + String(err))
 }
 }

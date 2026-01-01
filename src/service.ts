@@ -77,7 +77,7 @@ export class SteamService extends Service {
             break // Success for this chunk
           }
         } catch (e) {
-          this.ctx.logger('steam').error(`API key ${key} failed: ${e} EEE`)
+          this.ctx.logger('steam').error(`API key ${key} failed: ${e}`)
         }
       }
     }
