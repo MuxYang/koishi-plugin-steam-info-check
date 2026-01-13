@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-steam-info-check",
-  "version": "1.2.5",
+  "version": "1.2.7",
   "description": "Steam friends status broadcast plugin for Koishi",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -18,13 +18,13 @@
   ],
   "author": "MuxYang <tlnkmc.b@gmail.com>",
   "license": "MIT",
-  "homepage": "https://github.com/MuxYang/koishi-plugin-steam-info",
+  "homepage": "https://github.com/MuxYang/koishi-plugin-steam-info-check",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/MuxYang/koishi-plugin-steam-info.git"
+    "url": "git+https://github.com/MuxYang/koishi-plugin-steam-info-check.git"
   },
   "bugs": {
-    "url": "https://github.com/MuxYang/koishi-plugin-steam-info/issues"
+    "url": "https://github.com/MuxYang/koishi-plugin-steam-info-check/issues"
   },
   "koishi": {
     "description": {
