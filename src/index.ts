@@ -53,8 +53,6 @@ export const Config: Schema<Config> = Schema.object({
 })
 
 export const logger = new Logger('steam-info')
-// 将 INFO 级别完全静默（no-op），只保留 WARN 及以上输出。
-(logger as any).info = () => {}
 
 declare module 'koishi' {
   interface Context {
@@ -64,17 +62,11 @@ declare module 'koishi' {
 }
 
 export function apply(ctx: Context, config: Config) {
-  // Localization
   ctx.i18n.define('zh-CN', zhCN)
   ctx.i18n.define('zh', zhCN)
 
-  // Services
   ctx.plugin(SteamService, config)
   ctx.plugin(DrawService, config)
-
-  // 日志转发与管理员配置已移除：不再在运行时注入相关逻辑。
-
-  // Database
   ctx.model.extend('steam_bind', {
     id: 'unsigned',
     userId: 'string',
@@ -87,7 +79,7 @@ export function apply(ctx: Context, config: Config) {
   })
 
   ctx.model.extend('steam_channel', {
-    id: 'string', // channelId
+    id: 'string',
     enable: 'boolean',
     name: 'string',
     avatar: 'string',
@@ -97,7 +89,6 @@ export function apply(ctx: Context, config: Config) {
     primary: 'id',
   })
 
-  // Commands and scheduler depend on steam/drawer being ready
   ctx.using(['steam', 'drawer'], (ctx) => {
     ctx.command('steam', 'Steam 信息')
 
@@ -114,14 +105,9 @@ export function apply(ctx: Context, config: Config) {
         const targetId = await ctx.steam.getSteamId(steamId)
         if (!targetId) return session.text('.id_not_found')
 
-        // 检查是否已绑定
-        try {
-          const existing = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
-          if (existing.length) {
-            return session.text('.already_bound')
-          }
-        } catch (e) {
-          logger.error('检查已绑定状态失败：' + String(e))
+        const existing = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
+        if (existing.length) {
+          return session.text('.already_bound')
         }
 
         await ctx.database.upsert('steam_bind', [
@@ -160,7 +146,7 @@ export function apply(ctx: Context, config: Config) {
                 if (bind.length) steamId = bind[0].steamId
               }
             } catch {
-              /* ignore resolve errors */
+              // 忽略解析错误
             }
 
             if (!steamId && /^\d+$/.test(target)) {
@@ -272,7 +258,6 @@ export function apply(ctx: Context, config: Config) {
         return session.text('.nickname_set', [nickname])
       })
 
-    // Scheduler
     let skipFirstBroadcast = config.steamDisableBroadcastOnStartup
     const timer = ctx.setInterval(async () => {
       if (skipFirstBroadcast) {
@@ -289,14 +274,13 @@ export function apply(ctx: Context, config: Config) {
   })
 }
 
-// Broadcast Logic
+// 播报状态缓存
 const statusCache = new Map<string, any>()
-// playMeta stores per-player metadata to help decide whether a resumed play should be
-// considered a "start" (e.g., play A -> offline -> play A within 10 minutes should be ignored)
+// 玩家游戏状态元数据，用于判断短时间内重新开始同一游戏是否需要播报
 const playMeta = new Map<string, { lastLeftAt?: number, lastLeftGame?: string }>()
-// lastSeenAt records the last timestamp we observed a steamid in player summaries.
+// 上次见到玩家的时间戳
 const lastSeenAt = new Map<string, number>()
-// TTL for stale entries (default 7 days). Entries not seen for longer than this will be pruned.
+// 缓存过期时间（7天）
 const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 async function ensureChannelMeta(ctx: Context, session: Session) {
@@ -308,80 +292,46 @@ async function ensureChannelMeta(ctx: Context, session: Session) {
   if (!name && session.event?.channel?.name) {
     name = session.event.channel.name
   }
-  // OneBot 群名补充
+  // OneBot 群名获取
   if (!name && session.platform?.includes('onebot') && session.bot?.internal?.getGroupInfo) {
-    // 先尝试原始（primitive）参数，许多 adapter/napcat 期望直接的字符串或数字
-    const primitiveVariants = [channelId, Number(channelId)]
-    for (const arg of primitiveVariants) {
+    const tryGetGroupName = async (arg: any): Promise<string | null> => {
       try {
-        logger.error(`getGroupInfo 尝试 args=${JSON.stringify(arg)}`)
-        const info = await session.bot.internal.getGroupInfo(arg as any)
-        logger.error(`getGroupInfo 返回: ${JSON.stringify(info)}`)
-        if (info) {
-          if ((info as any).group_name) { name = (info as any).group_name; break }
-          if ((info as any).data && (info as any).data.group_name) { name = (info as any).data.group_name; break }
-          if ((info as any).data && (info as any).data.group && (info as any).data.group.group_name) { name = (info as any).data.group.group_name; break }
-          if ((info as any).ret && (info as any).ret.data && (info as any).ret.data.group_name) { name = (info as any).ret.data.group_name; break }
-        }
-      } catch (err) {
-        logger.error('getGroupInfo 原始参数调用失败，arg=' + JSON.stringify(arg) + '，错误：' + String(err))
-        if (err && (err as any).message) {
-          logger.error('getGroupInfo 原始错误信息: ' + String((err as any).message))
-        }
+        const info = await session.bot.internal.getGroupInfo(arg)
+        if (!info) return null
+        return (info as any).group_name
+          || (info as any).data?.group_name
+          || (info as any).data?.group?.group_name
+          || (info as any).ret?.data?.group_name
+          || null
+      } catch {
+        return null
       }
     }
 
-    // 如果 primitive 未成功，再尝试对象参数包裹形式
-    if (!name) {
-      const argVariants = [
-        { group_id: channelId },
-        { group_id: { group_id: channelId } },
-        { group_id: Number(channelId) },
-        { group_id: { group_id: Number(channelId) } },
-      ]
-      for (const args of argVariants) {
-        try {
-          logger.error(`getGroupInfo 尝试 args=${JSON.stringify(args)}`)
-          const info = await session.bot.internal.getGroupInfo(args)
-          logger.error(`getGroupInfo 返回: ${JSON.stringify(info)}`)
+    const argVariants = [
+      channelId,
+      Number(channelId),
+      { group_id: channelId },
+      { group_id: Number(channelId) },
+    ]
 
-          if (!info) continue
-
-          if ((info as any).group_name) { name = (info as any).group_name; break }
-          if ((info as any).data && (info as any).data.group_name) { name = (info as any).data.group_name; break }
-          if ((info as any).data && (info as any).data.group && (info as any).data.group.group_name) { name = (info as any).data.group.group_name; break }
-          if ((info as any).ret && (info as any).ret.data && (info as any).ret.data.group_name) { name = (info as any).ret.data.group_name; break }
-
-          logger.error('getGroupInfo 返回了未识别结构（尝试 参数：' + JSON.stringify(args) + '）: ' + JSON.stringify(info))
-        } catch (err) {
-          try {
-            logger.error('getGroupInfo 调用失败，args=' + JSON.stringify(args) + '，错误：' + String(err))
-            if (err && (err as any).message) {
-              logger.error('getGroupInfo 原始错误信息: ' + String((err as any).message))
-            }
-          } catch (e) {
-            logger.error('getGroupInfo 调用失败但记录 args 时出错：' + String(e))
-          }
-        }
+    for (const arg of argVariants) {
+      const result = await tryGetGroupName(arg)
+      if (result) {
+        name = result
+        break
       }
-    }
-
-    // 所有尝试失败，记录最终失败并使用回退值
-    if (!name) {
-      logger.error('getGroupInfo 所有尝试均失败，使用回退群名: ' + channelId)
-      name = channelId
     }
   }
 
   let avatar = current.avatar
   if (!avatar) {
     try {
-      // For QQ group avatars
       const url = `http://p.qlogo.cn/gh/${channelId}/${channelId}/0`
       const buffer = await ctx.http.get(url, { responseType: 'arraybuffer' })
       avatar = Buffer.from(buffer).toString('base64')
     } catch {
-      // fallback later to default avatar
+      // 使用默认头像
     }
   }
 
@@ -395,11 +345,9 @@ async function ensureChannelMeta(ctx: Context, session: Session) {
 
 async function seedStatusCache(ctx: Context) {
   const binds = await ctx.database.get('steam_bind', {})
-  logger.info(`seedStatusCache: load binds count=${binds.length}`)
   if (!binds.length) return
   const steamIds = [...new Set(binds.map(b => b.steamId))]
   const summaries = await ctx.steam.getPlayerSummaries(steamIds)
-  logger.info(`seedStatusCache: fetched summaries=${summaries.length}`)
   for (const player of summaries) {
     statusCache.set(player.steamid, player)
     lastSeenAt.set(player.steamid, Date.now())
@@ -409,23 +357,17 @@ async function seedStatusCache(ctx: Context) {
 async function broadcast(ctx: Context, config: Config) {
   try {
     const channels = await ctx.database.get('steam_channel', { enable: true })
-    logger.info(`broadcast: enabled channels=${channels.length}`)
-  if (channels.length === 0) return
+    if (channels.length === 0) return
 
     const channelIds = channels.map(c => c.id)
-  const binds = await ctx.database.get('steam_bind', { channelId: channelIds })
-    logger.info(`broadcast: binds total=${binds.length}`)
-  if (binds.length === 0) return
+    const binds = await ctx.database.get('steam_bind', { channelId: channelIds })
+    if (binds.length === 0) return
 
-  const steamIds = [...new Set(binds.map(b => b.steamId))]
-    logger.info(`broadcast: unique steamIds=${steamIds.length}`)
-
+    const steamIds = [...new Set(binds.map(b => b.steamId))]
     const currentSummaries = await ctx.steam.getPlayerSummaries(steamIds)
-    logger.info(`broadcast: fetched summaries=${currentSummaries.length}`)
-  const currentMap = new Map(currentSummaries.map(p => [p.steamid, p]))
+    const currentMap = new Map(currentSummaries.map(p => [p.steamid, p]))
 
   for (const channel of channels) {
-      logger.debug(`broadcast: channel=${channel.id} processing`)
     const channelBinds = binds.filter(b => b.channelId === channel.id)
     const msgs: string[] = []
     const startGamingPlayers: any[] = []
@@ -438,7 +380,7 @@ async function broadcast(ctx: Context, config: Config) {
 
       if (!current) continue
 
-      // If no previous cached summary, skip change detection for this round
+      // 无历史缓存时跳过变更检测
       if (!old) {
         continue
       }
@@ -449,44 +391,27 @@ async function broadcast(ctx: Context, config: Config) {
 
       const meta = playMeta.get(steamid) || {}
 
-      // Player started playing (was not playing before)
+      // 开始玩游戏
       if (newGame && !oldGame) {
-        // If previously left same game and rejoined within 10 minutes, ignore as restart
-        if (meta.lastLeftAt && meta.lastLeftGame === newGame) {
-          const delta = now - meta.lastLeftAt
-          if (delta < 10 * 60 * 1000) {
-            // treat as resume within grace period -> do nothing
-            // clear lastLeft info to avoid repeated ignores
-            meta.lastLeftAt = undefined
-            meta.lastLeftGame = undefined
-            playMeta.set(steamid, meta)
-          } else {
-            // left long ago -> treat as new start
-            msgs.push(`${name} 开始玩 ${newGame} 了`)
-            startGamingPlayers.push({ ...current, nickname: bind.nickname })
-            meta.lastLeftAt = undefined
-            meta.lastLeftGame = undefined
-            playMeta.set(steamid, meta)
-          }
-        } else {
-          // no previous left info -> treat as normal start
+        // 短时间内重新开始同一游戏不播报
+        const isResume = meta.lastLeftAt && meta.lastLeftGame === newGame && (now - meta.lastLeftAt) < 10 * 60 * 1000
+        if (!isResume) {
           msgs.push(`${name} 开始玩 ${newGame} 了`)
           startGamingPlayers.push({ ...current, nickname: bind.nickname })
-          meta.lastLeftAt = undefined
-          meta.lastLeftGame = undefined
-          playMeta.set(steamid, meta)
         }
-
-      // Player switched games: treat as start of new game (always notify)
-      } else if (newGame && oldGame && newGame !== oldGame) {
-        msgs.push(`${name} 开始玩 ${newGame} 了`)
-        startGamingPlayers.push({ ...current, nickname: bind.nickname })
-        // clear any left metadata
         meta.lastLeftAt = undefined
         meta.lastLeftGame = undefined
         playMeta.set(steamid, meta)
 
-      // Player stopped playing: record left timestamp and game
+      // 切换游戏
+      } else if (newGame && oldGame && newGame !== oldGame) {
+        msgs.push(`${name} 开始玩 ${newGame} 了`)
+        startGamingPlayers.push({ ...current, nickname: bind.nickname })
+        meta.lastLeftAt = undefined
+        meta.lastLeftGame = undefined
+        playMeta.set(steamid, meta)
+
+      // 停止游戏
       } else if (!newGame && oldGame) {
         meta.lastLeftAt = now
         meta.lastLeftGame = oldGame
@@ -495,12 +420,11 @@ async function broadcast(ctx: Context, config: Config) {
     }
 
     if (msgs.length > 0) {
-      logger.debug(`broadcast: channel=${channel.id} msgs=${msgs.length}`)
       const botKey = channel.platform && channel.assignee ? `${channel.platform}:${channel.assignee}` : undefined
       const bot = botKey ? ctx.bots[botKey] : Object.values(ctx.bots)[0]
       if (!bot) continue
 
-      // 统一使用 startBroadcastType：支持 all/part/none 或具体开始模式（list/text_image/image/text）
+      // 根据 startBroadcastType 配置决定播报格式
       const configured = (config as any).startBroadcastType || 'text_image'
       let broadcastType: string
       let startMode: string
@@ -512,11 +436,11 @@ async function broadcast(ctx: Context, config: Config) {
         startMode = configured
       }
 
-      // 如果为 none，始终仅文字
+      // 仅文字模式
       if (broadcastType === 'none') {
         await bot.sendMessage(channel.id, msgs.join('\n'))
       } else if (broadcastType === 'all') {
-        // all：优先展示整个频道的状态图（同 steam.check），若失败则回退文字
+        // 展示整个频道状态图
         try {
           const channelPlayers = channelBinds.map(b => currentMap.get(b.steamId)).filter(Boolean) as any[]
           const parentAvatar = channel.avatar ? Buffer.from(channel.avatar, 'base64') : await ctx.drawer.getDefaultAvatar()
@@ -532,7 +456,7 @@ async function broadcast(ctx: Context, config: Config) {
           await bot.sendMessage(channel.id, msgs.join('\n'))
         }
       } else {
-        // part：仅在有开始游戏的玩家时按 startBroadcastType 决定格式，否则仅文字
+        // 仅在有开始游戏的玩家时发送图片
         if (startGamingPlayers.length > 0) {
           if (startMode === 'list') {
             const channelPlayers = channelBinds.map(b => currentMap.get(b.steamId)).filter(Boolean) as any[]
@@ -545,7 +469,7 @@ async function broadcast(ctx: Context, config: Config) {
               await bot.sendMessage(channel.id, msgs.join('\n'))
             }
           } else if (startMode === 'text_image') {
-            // 先发送文字（如果有），然后逐个发送玩家图片，每张图片间隔 4-10s
+            // 发送文字后逐个发送玩家图片
             if (msgs.length > 0) await bot.sendMessage(channel.id, msgs.join('\n'))
             for (const p of startGamingPlayers) {
               try {
@@ -555,12 +479,10 @@ async function broadcast(ctx: Context, config: Config) {
               } catch (e) {
                 logger.error('broadcast drawStartGaming failed: ' + String(e))
               }
-              // 随机延迟 4-10 秒
-              const delay = Math.floor(Math.random() * (10000 - 4000 + 1)) + 4000
+              const delay = Math.floor(Math.random() * 6000) + 4000
               await new Promise(res => setTimeout(res, delay))
             }
           } else if (startMode === 'image') {
-            // 仅图片：逐个发送每位玩家的图片，图片间隔 4-10s
             for (const p of startGamingPlayers) {
               try {
                 const imgBuf = await ctx.drawer.drawStartGaming(p, p.nickname)
@@ -569,11 +491,10 @@ async function broadcast(ctx: Context, config: Config) {
               } catch (e) {
                 logger.error('broadcast drawStartGaming failed: ' + String(e))
               }
-              const delay = Math.floor(Math.random() * (10000 - 4000 + 1)) + 4000
+              const delay = Math.floor(Math.random() * 6000) + 4000
               await new Promise(res => setTimeout(res, delay))
             }
           } else {
-            // text
             await bot.sendMessage(channel.id, msgs.join('\n'))
           }
         } else {
@@ -583,11 +504,10 @@ async function broadcast(ctx: Context, config: Config) {
     }
   }
 
-  // 广播完成后更新缓存
   for (const p of currentSummaries) {
     statusCache.set(p.steamid, p)
   }
-  // 更新 lastSeenAt 并清理长期未见的条目，防止内存无限增长
+
   const now = Date.now()
   for (const p of currentSummaries) {
     lastSeenAt.set(p.steamid, now)
@@ -597,10 +517,9 @@ async function broadcast(ctx: Context, config: Config) {
       lastSeenAt.delete(id)
       statusCache.delete(id)
       playMeta.delete(id)
-      logger.info(`prune stale player data: ${id}`)
     }
   }
-} catch (err) {
-  logger.error('broadcast 发生异常：' + String(err))
-}
+  } catch (err) {
+    logger.error('broadcast error: ' + String(err))
+  }
 }

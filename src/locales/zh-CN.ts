@@ -29,18 +29,18 @@ export default {
   commands: {
     steam: {
       bind: {
-        usage: '用法：steam bind <steamId>',
+        usage: '用法：steam bind <steamId或好友码>',
         bind_success: '绑定成功！Steam ID: {0}',
         already_bound: '您已经绑定过帐号了！',
         current_bound: '您当前绑定的 Steam ID 为 {0}。',
-        invalid_id: '请输入有效的 Steam ID。',
-        id_not_found: '无法找到该 Steam ID。',
+        invalid_id: '请输入有效的 Steam ID或好友码。',
+        id_not_found: '无法找到该 Steam ID或好友码。',
         error: '发生错误。',
         messages: {
           current_bound: '您当前绑定的 Steam ID 为 {0}。',
           already_bound: '您已经绑定过帐号了！',
-          invalid_id: '请输入有效的 Steam ID。',
-          id_not_found: '无法找到该 Steam ID。',
+          invalid_id: '请输入有效的 Steam ID或好友码。',
+          id_not_found: '无法找到该 Steam ID或好友码。',
           bind_success: '绑定成功！Steam ID: {0}',
           error: '发生错误。',
         },
@@ -48,11 +48,11 @@ export default {
       unbind: {
         usage: '用法：steam unbind',
         unbind_success: '解绑成功。',
-        not_bound: '你还没有绑定 Steam ID。',
+        not_bound: '你还没有绑定 Steam。',
         error: '发生错误。',
         messages: {
           unbind_success: '解绑成功。',
-          not_bound: '你还没有绑定 Steam ID。',
+          not_bound: '你还没有绑定 Steam。',
           error: '发生错误。',
         },
       },
@@ -107,11 +107,11 @@ export default {
       },
       nickname: {
         usage: '用法：steam nickname <nickname>',
-        not_bound: '你还没有绑定 Steam ID。',
+        not_bound: '你还没有绑定 Steam。',
         nickname_set: '昵称已设置为 {0}。',
         error: '发生错误。',
         messages: {
-          not_bound: '你还没有绑定 Steam ID。',
+          not_bound: '你还没有绑定 Steam。',
           nickname_set: '昵称已设置为 {0}。',
           error: '发生错误。',
         },

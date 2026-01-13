@@ -2,7 +2,6 @@ import { Context, Service } from 'koishi'
 import { Config } from './index'
 import cheerio from 'cheerio'
 
-// Constants
 const STEAM_ID_OFFSET = BigInt('76561197960265728')
 
 export interface PlayerSummary {
@@ -59,7 +58,6 @@ export class SteamService extends Service {
   async getPlayerSummaries(steamIds: string[]): Promise<PlayerSummary[]> {
     if (steamIds.length === 0) return []
     
-    // Split into chunks of 100
     const chunks: string[][] = []
     for (let i = 0; i < steamIds.length; i += 100) {
       chunks.push(steamIds.slice(i, i + 100))
@@ -67,14 +65,13 @@ export class SteamService extends Service {
 
     const players: PlayerSummary[] = []
     for (const chunk of chunks) {
-      // Try keys
       for (const key of this.config.steamApiKey) {
         try {
           const url = `http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=${key}&steamids=${chunk.join(',')}`
           const data = await this.ctx.http.get(url)
           if (data?.response?.players) {
             players.push(...data.response.players)
-            break // Success for this chunk
+            break
           }
         } catch (e) {
           this.ctx.logger('steam').error(`API key ${key} failed: ${e}`)
@@ -86,7 +83,6 @@ export class SteamService extends Service {
 
   async getUserData(steamId: string): Promise<SteamProfile> {
     const url = `https://steamcommunity.com/profiles/${steamId}`
-    // Cookie for timezone
     const headers = {
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       'Cookie': 'timezoneOffset=28800,0'

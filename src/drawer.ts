@@ -22,7 +22,6 @@ export class DrawService extends Service {
       body { font-family: 'MiSans', sans-serif; margin: 0; padding: 0; background-color: #1e2024; color: #fff; }
     `
     
-    // Helper to load font
     const loadFont = (name: string, path: string, weight: string) => {
       try {
         const fullPath = resolve(this.ctx.baseDir, path)
@@ -52,7 +51,7 @@ export class DrawService extends Service {
     if (Buffer.isBuffer(img)) {
       return `data:image/png;base64,${img.toString('base64')}`
     }
-    return img // URL
+    return img
   }
 
   async drawStartGaming(player: PlayerSummary, nickname?: string): Promise<Buffer | string> {
@@ -157,7 +156,7 @@ export class DrawService extends Service {
         } else if (player.personastate !== 0) {
           statusText = this.getPersonaStateText(player.personastate)
           nameColor = '#6dcff6'
-          statusColor = '#6dcff6' // Usually blue for online
+          statusColor = '#6dcff6'
         }
 
         listHtml += `
@@ -275,8 +274,6 @@ export class DrawService extends Service {
 
     const page = await this.ctx.puppeteer.page()
     await page.setContent(html)
-    // We need to capture the full height. 
-    // We can select 'body' or '.main'.
     const element = await page.$('body')
     const buffer = await element.screenshot({ type: 'png' })
     await page.close()
@@ -389,7 +386,7 @@ export class DrawService extends Service {
             margin-bottom: 10px;
           }
           .game-img {
-            width: 184px; /* Standard capsule width */
+            width: 184px;
             height: 69px;
             margin-right: 20px;
           }
@@ -448,7 +445,6 @@ export class DrawService extends Service {
     if (images.length === 0) return null
     if (images.length === 1) return images[0]
     
-    //stack images
     let imgsHtml = ''
     for (const img of images) {
         const src = this.imageToBase64(img)
@@ -471,10 +467,9 @@ export class DrawService extends Service {
   }
 
   async getDefaultAvatar(): Promise<Buffer | string> {
-      // Just a placeholder color
-      const html = `
+    const html = `
       <html><body style="margin:0;padding:0;"><div style="width:100px;height:100px;background-color:#ccc;"></div></body></html>
-      `
+    `
       const page = await this.ctx.puppeteer.page()
       await page.setContent(html)
       const element = await page.$('div')
