@@ -66,15 +66,23 @@ export class SteamService extends Service {
       return this.gameNameCache.get(appid)!
     }
 
-    try {
-      const data = await this.http.get(`https://store.steampowered.com/api/appdetails?appids=${appid}&l=schinese`)
-      if (data?.[appid]?.success) {
-        const name = data[appid].data.name
-        this.gameNameCache.set(appid, name)
-        return name
+    const maxRetries = 3
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const data = await this.http.get(`https://store.steampowered.com/api/appdetails?appids=${appid}&l=schinese`, { timeout: 10000 })
+        if (data?.[appid]?.success) {
+          const name = data[appid].data.name
+          this.gameNameCache.set(appid, name)
+          return name
+        }
+        break
+      } catch (e) {
+        if (attempt === maxRetries) {
+          this.ctx.logger('steam').warn(`Failed to get game name for ${appid} after ${maxRetries} retries: ${e}`)
+        } else {
+          await new Promise(res => setTimeout(res, Math.min(1000 * attempt, 5000)))
+        }
       }
-    } catch (e) {
-      this.ctx.logger('steam').warn(`Failed to get game name for ${appid}: ${e}`)
     }
     
     return ''
@@ -147,7 +155,7 @@ export class SteamService extends Service {
 
     let html: any
     try {
-      html = await this.http.get(url, { headers })
+      html = await this.http.get(url, { headers, timeout: 30000, maxRedirects: 5 })
     } catch (e) {
       this.ctx.logger('steam').error(`获取Steam资料失败 (网络错误): ${e}`)
       throw new Error(`无法连接到Steam社区: ${e}`)

@@ -1,6 +1,7 @@
-invalid_id: "请输入有效的 Steam ID或好友码。"
-id_not_found: "无法找到该 Steam ID或好友码。"
+invalid_id: "请输入有效的 Steam ID 或好友码。"
+id_not_found: "无法找到该 Steam ID 或好友码。"
 bind_success: "绑定成功！Steam ID: {0}"
+already_bound: "您已经绑定过帐号了！"
 unbind_success: "解绑成功。"
 not_bound: "你还没有绑定 Steam。"
 user_not_found: "未找到用户信息。"
@@ -9,10 +10,8 @@ no_binds: "本群尚无绑定用户。"
 api_error: "连接 Steam API 失败。"
 enable_success: "已开启本群播报。"
 disable_success: "已关闭本群播报。"
-args_missing: "参数缺失。"
 update_success: "更新群信息成功。"
 nickname_set: "昵称已设置为 {0}。"
-current_bound: "您当前绑定的 Steam ID 为 {0}。"
 
 fonts:
   regular: "常规字体路径"
@@ -21,8 +20,8 @@ fonts:
 
 steamDisableBroadcastOnStartup: "启动时禁用首次播报（仅预热缓存）"
 steamRequestInterval: "轮询间隔（秒）"
-enableIpCheck: "启用IP检测：Steam API连接失败时，检测本机外网IP（前两段，后两段隐藏为*）"
-startBroadcastType: "播报方式（all/part/none/list/text_image/image/text）"
+enableIpCheck: "启用IP检测：Steam API连接失败时，检测本机外网IP"
+startBroadcastType: "播报方式（all=全部图片/part=开始时按模式/none=仅文字/list/text_image/image/text）"
 
 commandAuthority:
   bind: "绑定命令权限"
