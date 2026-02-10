@@ -1,4 +1,4 @@
-import { Context, Service, h } from 'koishi'
+import { Context, Service } from 'koishi'
 import { Config } from './index'
 import { SteamBind } from './database'
 import { PlayerSummary, SteamProfile } from './service'
@@ -13,7 +13,7 @@ declare module 'koishi' {
 
 export class DrawService extends Service {
   constructor(ctx: Context, public config: Config) {
-    super(ctx, 'drawer', true)
+    super(ctx, 'drawer')
   }
 
   private getFontCss(): string {
@@ -21,7 +21,7 @@ export class DrawService extends Service {
     let css = `
       body { font-family: 'MiSans', sans-serif; margin: 0; padding: 0; background-color: #1e2024; color: #fff; }
     `
-    
+
     const loadFont = (name: string, path: string, weight: string) => {
       try {
         const fullPath = resolve(this.ctx.baseDir, path)
@@ -54,10 +54,26 @@ export class DrawService extends Service {
     return img
   }
 
+  /** HTML 转义，防止渲染问题 */
+  private escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;')
+  }
+
   async drawStartGaming(player: PlayerSummary, nickname?: string): Promise<Buffer | string> {
     const avatarUrl = player.avatarfull
     const name = nickname || player.personaname
-    const game = player.gameextrainfo || 'Unknown Game'
+    let game = player.gameextrainfo || 'Unknown Game'
+    let status = '正在玩'
+
+    if (game === 'Wallpaper Engine' || String(player.gameid) === '431960') {
+      status = '正在🛫'
+      game = '(Wallpaper Engine)'
+    }
 
     const html = `
     <html>
@@ -105,9 +121,9 @@ export class DrawService extends Service {
         <div class="container">
           <img class="avatar" src="${avatarUrl}" />
           <div class="info">
-            <div class="name">${name}</div>
-            <div class="status">正在玩</div>
-            <div class="game">${game}</div>
+            <div class="name">${this.escapeHtml(name)}</div>
+            <div class="status">${this.escapeHtml(status)}</div>
+            <div class="game">${this.escapeHtml(game)}</div>
           </div>
         </div>
       </body>
@@ -124,9 +140,9 @@ export class DrawService extends Service {
 
   async drawFriendsStatus(parentAvatar: Buffer | string, parentName: string, players: PlayerSummary[], binds: SteamBind[]): Promise<Buffer | string> {
     const sorted = [...players].sort((a, b) => {
-        const stateA = this.getPlayerStateOrder(a)
-        const stateB = this.getPlayerStateOrder(b)
-        return stateA - stateB
+      const stateA = this.getPlayerStateOrder(a)
+      const stateB = this.getPlayerStateOrder(b)
+      return stateA - stateB
     })
 
     const groups = [
@@ -142,15 +158,15 @@ export class DrawService extends Service {
       listHtml += `<div class="group-title">${group.title} (${group.items.length})</div>`
       for (const player of group.items) {
         const bind = binds.find(b => b.steamId === player.steamid)
-        const name = bind?.nickname || player.personaname
+        const name = this.escapeHtml(bind?.nickname || player.personaname)
         const avatar = player.avatarmedium || player.avatar
-        
+
         let statusText = '离线'
         let nameColor = '#656565'
         let statusColor = '#656565'
 
         if (player.gameextrainfo) {
-          statusText = player.gameextrainfo
+          statusText = this.escapeHtml(player.gameextrainfo)
           nameColor = '#91c257'
           statusColor = '#91c257'
         } else if (player.personastate !== 0) {
@@ -259,7 +275,7 @@ export class DrawService extends Service {
           <div class="header">
             <img class="parent-avatar" src="${parentAvatarSrc}" />
             <div class="parent-info">
-              <div class="parent-name">${parentName}</div>
+              <div class="parent-name">${this.escapeHtml(parentName)}</div>
               <div class="parent-status">在线</div>
             </div>
           </div>
@@ -291,10 +307,10 @@ export class DrawService extends Service {
         <div class="game-row">
           <img class="game-img" src="${gameImg}" />
           <div class="game-info">
-            <div class="game-name">${game.game_name}</div>
+            <div class="game-name">${this.escapeHtml(game.game_name)}</div>
             <div class="game-stats">
               <span class="play-time">${game.play_time ? `总时数 ${game.play_time} 小时` : ''}</span>
-              <span class="last-played">${game.last_played}</span>
+              <span class="last-played">${this.escapeHtml(game.last_played)}</span>
             </div>
           </div>
         </div>
@@ -416,9 +432,9 @@ export class DrawService extends Service {
           <div class="header">
             <img class="profile-avatar" src="${avatarSrc}" />
             <div class="profile-info">
-              <div class="profile-name">${profile.player_name}</div>
+              <div class="profile-name">${this.escapeHtml(profile.player_name)}</div>
               <div class="profile-id">ID: ${steamId}</div>
-              <div class="profile-desc">${profile.description}</div>
+              <div class="profile-desc">${this.escapeHtml(profile.description)}</div>
             </div>
           </div>
           <div class="games-section">
@@ -441,51 +457,26 @@ export class DrawService extends Service {
     return buffer
   }
 
-  async concatImages(images: (Buffer | string)[]): Promise<Buffer | string | null> {
-    if (images.length === 0) return null
-    if (images.length === 1) return images[0]
-    
-    let imgsHtml = ''
-    for (const img of images) {
-        const src = this.imageToBase64(img)
-        imgsHtml += `<img src="${src}" style="display: block;" />`
-    }
-
-    const html = `
-    <html>
-      <body style="margin:0; padding:0; display: flex; flex-direction: column; width: fit-content;">
-        ${imgsHtml}
-      </body>
-    </html>
-    `
-    const page = await this.ctx.puppeteer.page()
-    await page.setContent(html)
-    const element = await page.$('body')
-    const buffer = await element.screenshot({ type: 'png', omitBackground: true })
-    await page.close()
-    return buffer
-  }
-
   async getDefaultAvatar(): Promise<Buffer | string> {
     const html = `
       <html><body style="margin:0;padding:0;"><div style="width:100px;height:100px;background-color:#ccc;"></div></body></html>
     `
-      const page = await this.ctx.puppeteer.page()
-      await page.setContent(html)
-      const element = await page.$('div')
-      const buffer = await element.screenshot({ type: 'png' })
-      await page.close()
-      return buffer
+    const page = await this.ctx.puppeteer.page()
+    await page.setContent(html)
+    const element = await page.$('div')
+    const buffer = await element.screenshot({ type: 'png' })
+    await page.close()
+    return buffer
   }
 
   private getPlayerStateOrder(p: PlayerSummary) {
-      if (p.gameextrainfo) return 0
-      if (p.personastate !== 0) return 1
-      return 2
+    if (p.gameextrainfo) return 0
+    if (p.personastate !== 0) return 1
+    return 2
   }
 
   private getPersonaStateText(state: number) {
-      const map = ['离线', '在线', '忙碌', '离开', '打盹', '寻求交易', '寻求游戏']
-      return map[state] || '未知'
+    const map = ['离线', '在线', '忙碌', '离开', '打盹', '寻求交易', '寻求游戏']
+    return map[state] || '未知'
   }
 }

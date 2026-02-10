@@ -14,7 +14,6 @@ update_success: "更新群信息成功。"
 nickname_set: "昵称已设置为 {0}。"
 current_bound: "您当前绑定的 Steam ID 为 {0}。"
 
-# 配置面板本地化
 fonts:
   regular: "常规字体路径"
   light: "细体字体路径"
@@ -22,7 +21,8 @@ fonts:
 
 steamDisableBroadcastOnStartup: "启动时禁用首次播报（仅预热缓存）"
 steamRequestInterval: "轮询间隔（秒）"
-# steamBroadcastType 已合并到 startBroadcastType
+enableIpCheck: "启用IP检测：Steam API连接失败时，检测本机外网IP（前两段，后两段隐藏为*）"
+startBroadcastType: "播报方式（all/part/none/list/text_image/image/text）"
 
 commandAuthority:
   bind: "绑定命令权限"
@@ -33,4 +33,3 @@ commandAuthority:
   disable: "禁用播报命令权限"
   update: "更新群信息命令权限"
   nickname: "设置昵称命令权限"
-# logForwardTarget 与 adminId 已移除

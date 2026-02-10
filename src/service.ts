@@ -13,6 +13,7 @@ export interface PlayerSummary {
   avatarfull: string
   personastate: number 
   gameextrainfo?: string
+  gameid?: string
   lastlogoff?: number
 }
 
@@ -42,8 +43,41 @@ export interface Achievement {
 }
 
 export class SteamService extends Service {
+  private http: any
+
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'steam', true)
+    this.http = ctx.http.extend({
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
+      }
+    })
+    
+    if (config.proxy) {
+      this.http = this.http.extend({ proxy: config.proxy })
+    }
+  }
+
+  private gameNameCache = new Map<string, string>()
+
+  async getLocalizedGameName(inputAppid: string | number): Promise<string> {
+    const appid = String(inputAppid)
+    if (this.gameNameCache.has(appid)) {
+      return this.gameNameCache.get(appid)!
+    }
+
+    try {
+      const data = await this.http.get(`https://store.steampowered.com/api/appdetails?appids=${appid}&l=schinese`)
+      if (data?.[appid]?.success) {
+        const name = data[appid].data.name
+        this.gameNameCache.set(appid, name)
+        return name
+      }
+    } catch (e) {
+      this.ctx.logger('steam').warn(`Failed to get game name for ${appid}: ${e}`)
+    }
+    
+    return ''
   }
 
   async getSteamId(input: string): Promise<string | null> {
@@ -65,20 +99,43 @@ export class SteamService extends Service {
 
     const players: PlayerSummary[] = []
     for (const chunk of chunks) {
+      let success = false
       for (const key of this.config.steamApiKey) {
         try {
           const url = `http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=${key}&steamids=${chunk.join(',')}`
-          const data = await this.ctx.http.get(url)
+          const data = await this.http.get(url)
           if (data?.response?.players) {
             players.push(...data.response.players)
+            success = true
             break
           }
         } catch (e) {
           this.ctx.logger('steam').error(`API key ${key} failed: ${e}`)
         }
       }
+      
+      // 如果所有key都失败且启用IP检测，执行IP检测
+      if (!success && this.config.enableIpCheck) {
+        await this.checkAndLogIp()
+      }
     }
     return players
+  }
+
+  private async checkAndLogIp(): Promise<void> {
+    try {
+      const ip = await this.http.get('http://4.ipw.cn', { responseType: 'text' })
+      const ipStr = String(ip).trim()
+      const parts = ipStr.split('.')
+      if (parts.length === 4) {
+        const maskedIp = `${parts[0]}.${parts[1]}.*.*`
+        this.ctx.logger('steam').warn(`Steam API连接失败，当前IP: ${maskedIp}`)
+      } else {
+        this.ctx.logger('steam').warn(`Steam API连接失败，IP检测返回: ${ipStr}`)
+      }
+    } catch (e) {
+      this.ctx.logger('steam').error(`IP检测失败: ${e}`)
+    }
   }
 
   async getUserData(steamId: string): Promise<SteamProfile> {
@@ -88,7 +145,19 @@ export class SteamService extends Service {
       'Cookie': 'timezoneOffset=28800,0'
     }
 
-    const html = await this.ctx.http.get(url, { headers })
+    let html: any
+    try {
+      html = await this.http.get(url, { headers })
+    } catch (e) {
+      this.ctx.logger('steam').error(`获取Steam资料失败 (网络错误): ${e}`)
+      throw new Error(`无法连接到Steam社区: ${e}`)
+    }
+
+    if (!html) {
+      this.ctx.logger('steam').error(`获取Steam资料失败: HTML为空，steamId=${steamId}`)
+      throw new Error('无法获取Steam资料，可能是账户不存在或为私密')
+    }
+
     const $ = cheerio.load(html)
 
     const player_name = $('.actual_persona_name').text().trim() || $('title').text().replace('Steam 社区 :: ', '')

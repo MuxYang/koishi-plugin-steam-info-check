@@ -1,5 +1,5 @@
-import { Context, Schema, Logger, Service, Session, h } from 'koishi'
-import { SteamService } from './service'
+import { Context, Schema, Logger, Session, h } from 'koishi'
+import { SteamService, PlayerSummary } from './service'
 import { DrawService } from './drawer'
 import { SteamBind, SteamChannel } from './database'
 import zhCN from './locales/zh-CN'
@@ -11,7 +11,9 @@ export interface Config {
   steamApiKey: string[]
   proxy?: string
   steamRequestInterval: number
+  startBroadcastType: 'all' | 'part' | 'none' | 'list' | 'text_image' | 'image' | 'text'
   steamDisableBroadcastOnStartup: boolean
+  enableIpCheck: boolean
   fonts: {
     regular: string
     light: string
@@ -35,6 +37,7 @@ export const Config: Schema<Config> = Schema.object({
   steamRequestInterval: Schema.number().default(300).description('轮询间隔（秒）'),
   startBroadcastType: Schema.union(['all','part','none','list','text_image','image','text']).default('text_image').description('播报方式：可选 all（全部图片列表）、part（仅开始游戏时按后续模式）、none（仅文字），或具体开始模式 list/text_image/image/text'),
   steamDisableBroadcastOnStartup: Schema.boolean().default(false).description('启动时禁用首次播报（仅预热缓存）'),
+  enableIpCheck: Schema.boolean().default(false).description('启用IP检测：Steam API连接失败时，检测本机外网IP（前两段，后两段隐藏为*）'),
   fonts: Schema.object({
     regular: Schema.string().default('fonts/MiSans-Regular.ttf'),
     light: Schema.string().default('fonts/MiSans-Light.ttf'),
@@ -138,23 +141,26 @@ export function apply(ctx: Context, config: Config) {
         if (!session) return
         try {
           let steamId: string | null = null
+          
           if (target) {
-            try {
-              const [, userId] = session.resolve(target)
-              if (userId) {
-                const bind = await ctx.database.get('steam_bind', { userId, channelId: session.channelId })
-                if (bind.length) steamId = bind[0].steamId
-              }
-            } catch {
-              // 忽略解析错误
+            // 尝试解析@提及
+            const parsed = h.parse(target)
+            const atElement = parsed.find(el => el.type === 'at')
+            if (atElement?.attrs?.id) {
+              const bind = await ctx.database.get('steam_bind', { userId: atElement.attrs.id, channelId: session.channelId })
+              if (bind.length) steamId = bind[0].steamId
             }
 
+            // 如果未通过@找到，尝试解析为Steam ID
             if (!steamId && /^\d+$/.test(target)) {
               steamId = await ctx.steam.getSteamId(target)
             }
           } else {
+            // 没有提供参数，使用当前用户的绑定账户
             const bind = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
-            if (bind.length) steamId = bind[0].steamId
+            if (bind.length) {
+              steamId = bind[0].steamId
+            }
           }
 
           if (!steamId) return session.text('.user_not_found')
@@ -327,7 +333,7 @@ async function ensureChannelMeta(ctx: Context, session: Session) {
   let avatar = current.avatar
   if (!avatar) {
     try {
-      const url = `http://p.qlogo.cn/gh/${channelId}/${channelId}/0`
+      const url = `https://p.qlogo.cn/gh/${channelId}/${channelId}/0`
       const buffer = await ctx.http.get(url, { responseType: 'arraybuffer' })
       avatar = Buffer.from(buffer).toString('base64')
     } catch {
@@ -367,159 +373,150 @@ async function broadcast(ctx: Context, config: Config) {
     const currentSummaries = await ctx.steam.getPlayerSummaries(steamIds)
     const currentMap = new Map(currentSummaries.map(p => [p.steamid, p]))
 
-  for (const channel of channels) {
-    const channelBinds = binds.filter(b => b.channelId === channel.id)
-    const msgs: string[] = []
-    const startGamingPlayers: any[] = []
+    for (const channel of channels) {
+      const channelBinds = binds.filter(b => b.channelId === channel.id)
+      const msgs: string[] = []
+      const startGamingPlayers: (PlayerSummary & { nickname?: string })[] = []
 
-    const now = Date.now()
-    for (const bind of channelBinds) {
-      const steamid = bind.steamId
-      const current = currentMap.get(steamid)
-      const old = statusCache.get(steamid)
+      const now = Date.now()
+      for (const bind of channelBinds) {
+        const current = currentMap.get(bind.steamId)
+        const old = statusCache.get(bind.steamId)
+        if (!current || !old) continue
 
-      if (!current) continue
+        const oldGame = old.gameextrainfo || null
+        const newGame = current.gameextrainfo || null
+        const name = bind.nickname || current.personaname
 
-      // 无历史缓存时跳过变更检测
-      if (!old) {
-        continue
-      }
-
-      const oldGame = old.gameextrainfo || null
-      const newGame = current.gameextrainfo || null
-      const name = bind.nickname || current.personaname
-
-      const meta = playMeta.get(steamid) || {}
-
-      // 开始玩游戏
-      if (newGame && !oldGame) {
-        // 短时间内重新开始同一游戏不播报
-        const isResume = meta.lastLeftAt && meta.lastLeftGame === newGame && (now - meta.lastLeftAt) < 10 * 60 * 1000
-        if (!isResume) {
-          msgs.push(`${name} 开始玩 ${newGame} 了`)
-          startGamingPlayers.push({ ...current, nickname: bind.nickname })
+        let displayGameName = newGame
+        if (newGame && current.gameid) {
+          const localized = await ctx.steam.getLocalizedGameName(current.gameid)
+          if (localized) displayGameName = localized
         }
-        meta.lastLeftAt = undefined
-        meta.lastLeftGame = undefined
-        playMeta.set(steamid, meta)
 
-      // 切换游戏
-      } else if (newGame && oldGame && newGame !== oldGame) {
-        msgs.push(`${name} 开始玩 ${newGame} 了`)
-        startGamingPlayers.push({ ...current, nickname: bind.nickname })
-        meta.lastLeftAt = undefined
-        meta.lastLeftGame = undefined
-        playMeta.set(steamid, meta)
+        const meta = playMeta.get(bind.steamId) || {}
 
-      // 停止游戏
-      } else if (!newGame && oldGame) {
-        meta.lastLeftAt = now
-        meta.lastLeftGame = oldGame
-        playMeta.set(steamid, meta)
+        if (newGame && !oldGame) {
+          // 开始玩游戏（短时间内重新开始同一游戏不播报）
+          const isResume = meta.lastLeftAt && meta.lastLeftGame === newGame && (now - meta.lastLeftAt) < 10 * 60 * 1000
+          if (!isResume) {
+            msgs.push(`${name} 开始玩 ${displayGameName} 了`)
+            startGamingPlayers.push({ ...current, nickname: bind.nickname, gameextrainfo: displayGameName as string })
+          }
+          meta.lastLeftAt = undefined
+          meta.lastLeftGame = undefined
+          playMeta.set(bind.steamId, meta)
+        } else if (newGame && oldGame && newGame !== oldGame) {
+          // 切换游戏
+          msgs.push(`${name} 开始玩 ${displayGameName} 了`)
+          startGamingPlayers.push({ ...current, nickname: bind.nickname, gameextrainfo: displayGameName as string })
+          meta.lastLeftAt = undefined
+          meta.lastLeftGame = undefined
+          playMeta.set(bind.steamId, meta)
+        } else if (!newGame && oldGame) {
+          // 停止游戏
+          meta.lastLeftAt = now
+          meta.lastLeftGame = oldGame
+          playMeta.set(bind.steamId, meta)
+        }
       }
-    }
 
-    if (msgs.length > 0) {
+      if (msgs.length === 0) continue
+
       const botKey = channel.platform && channel.assignee ? `${channel.platform}:${channel.assignee}` : undefined
       const bot = botKey ? ctx.bots[botKey] : Object.values(ctx.bots)[0]
       if (!bot) continue
 
-      // 根据 startBroadcastType 配置决定播报格式
-      const configured = (config as any).startBroadcastType || 'text_image'
-      let broadcastType: string
-      let startMode: string
-      if (['all', 'part', 'none'].includes(configured)) {
-        broadcastType = configured
-        startMode = 'text_image'
-      } else {
-        broadcastType = 'part'
-        startMode = configured
-      }
+      await sendBroadcast(ctx, config, bot, channel, msgs, startGamingPlayers, channelBinds, currentMap)
+    }
 
-      // 仅文字模式
-      if (broadcastType === 'none') {
-        await bot.sendMessage(channel.id, msgs.join('\n'))
-      } else if (broadcastType === 'all') {
-        // 展示整个频道状态图
-        try {
-          const channelPlayers = channelBinds.map(b => currentMap.get(b.steamId)).filter(Boolean) as any[]
-          const parentAvatar = channel.avatar ? Buffer.from(channel.avatar, 'base64') : await ctx.drawer.getDefaultAvatar()
-          const image = await ctx.drawer.drawFriendsStatus(parentAvatar, channel.name || channel.id, channelPlayers, channelBinds)
-          if (image) {
-            const img = typeof image === 'string' ? image : h.image(image, 'image/png')
-            await bot.sendMessage(channel.id, msgs.join('\n') + img)
-          } else {
-            await bot.sendMessage(channel.id, msgs.join('\n'))
-          }
-        } catch (e) {
-          logger.error('broadcast draw full list failed: ' + String(e))
-          await bot.sendMessage(channel.id, msgs.join('\n'))
-        }
-      } else {
-        // 仅在有开始游戏的玩家时发送图片
-        if (startGamingPlayers.length > 0) {
-          if (startMode === 'list') {
-            const channelPlayers = channelBinds.map(b => currentMap.get(b.steamId)).filter(Boolean) as any[]
-            const parentAvatar = channel.avatar ? Buffer.from(channel.avatar, 'base64') : await ctx.drawer.getDefaultAvatar()
-            const image = await ctx.drawer.drawFriendsStatus(parentAvatar, channel.name || channel.id, channelPlayers, channelBinds)
-            if (image) {
-              const img = typeof image === 'string' ? image : h.image(image, 'image/png')
-              await bot.sendMessage(channel.id, msgs.join('\n') + img)
-            } else {
-              await bot.sendMessage(channel.id, msgs.join('\n'))
-            }
-          } else if (startMode === 'text_image') {
-            // 发送文字后逐个发送玩家图片
-            if (msgs.length > 0) await bot.sendMessage(channel.id, msgs.join('\n'))
-            for (const p of startGamingPlayers) {
-              try {
-                const imgBuf = await ctx.drawer.drawStartGaming(p, p.nickname)
-                const img = imgBuf ? (typeof imgBuf === 'string' ? imgBuf : h.image(imgBuf, 'image/png')) : ''
-                if (img) await bot.sendMessage(channel.id, img)
-              } catch (e) {
-                logger.error('broadcast drawStartGaming failed: ' + String(e))
-              }
-              const delay = Math.floor(Math.random() * 6000) + 4000
-              await new Promise(res => setTimeout(res, delay))
-            }
-          } else if (startMode === 'image') {
-            for (const p of startGamingPlayers) {
-              try {
-                const imgBuf = await ctx.drawer.drawStartGaming(p, p.nickname)
-                const img = imgBuf ? (typeof imgBuf === 'string' ? imgBuf : h.image(imgBuf, 'image/png')) : ''
-                if (img) await bot.sendMessage(channel.id, img)
-              } catch (e) {
-                logger.error('broadcast drawStartGaming failed: ' + String(e))
-              }
-              const delay = Math.floor(Math.random() * 6000) + 4000
-              await new Promise(res => setTimeout(res, delay))
-            }
-          } else {
-            await bot.sendMessage(channel.id, msgs.join('\n'))
-          }
-        } else {
-          await bot.sendMessage(channel.id, msgs.join('\n'))
-        }
+    // 更新缓存
+    const now = Date.now()
+    for (const p of currentSummaries) {
+      statusCache.set(p.steamid, p)
+      lastSeenAt.set(p.steamid, now)
+    }
+    // 清理过期缓存
+    for (const [id, ts] of lastSeenAt.entries()) {
+      if (now - ts > STALE_TTL_MS) {
+        lastSeenAt.delete(id)
+        statusCache.delete(id)
+        playMeta.delete(id)
       }
     }
-  }
-
-  for (const p of currentSummaries) {
-    statusCache.set(p.steamid, p)
-  }
-
-  const now = Date.now()
-  for (const p of currentSummaries) {
-    lastSeenAt.set(p.steamid, now)
-  }
-  for (const [id, ts] of Array.from(lastSeenAt.entries())) {
-    if (now - ts > STALE_TTL_MS) {
-      lastSeenAt.delete(id)
-      statusCache.delete(id)
-      playMeta.delete(id)
-    }
-  }
   } catch (err) {
     logger.error('broadcast error: ' + String(err))
+  }
+}
+
+/** 发送播报消息 */
+async function sendBroadcast(
+  ctx: Context, config: Config, bot: any, channel: SteamChannel,
+  msgs: string[], startGamingPlayers: (PlayerSummary & { nickname?: string })[],
+  channelBinds: SteamBind[], currentMap: Map<string, PlayerSummary>,
+) {
+  const configured = config.startBroadcastType || 'text_image'
+  let broadcastType: string
+  let startMode: string
+  if (['all', 'part', 'none'].includes(configured)) {
+    broadcastType = configured
+    startMode = 'text_image'
+  } else {
+    broadcastType = 'part'
+    startMode = configured
+  }
+
+  const sendListImage = async (withText: boolean) => {
+    try {
+      const channelPlayers = channelBinds.map(b => currentMap.get(b.steamId)).filter(Boolean) as PlayerSummary[]
+      const parentAvatar = channel.avatar ? Buffer.from(channel.avatar, 'base64') : await ctx.drawer.getDefaultAvatar()
+      const image = await ctx.drawer.drawFriendsStatus(parentAvatar, channel.name || channel.id, channelPlayers, channelBinds)
+      if (image) {
+        const img = typeof image === 'string' ? image : h.image(image, 'image/png')
+        await bot.sendMessage(channel.id, withText ? msgs.join('\n') + img : img)
+        return
+      }
+    } catch (e) {
+      logger.error('broadcast draw list failed: ' + String(e))
+    }
+    if (withText) await bot.sendMessage(channel.id, msgs.join('\n'))
+  }
+
+  const sendPlayerImages = async () => {
+    for (const p of startGamingPlayers) {
+      try {
+        const imgBuf = await ctx.drawer.drawStartGaming(p, p.nickname)
+        if (imgBuf) {
+          const img = typeof imgBuf === 'string' ? imgBuf : h.image(imgBuf, 'image/png')
+          await bot.sendMessage(channel.id, img)
+        }
+      } catch (e) {
+        logger.error('broadcast drawStartGaming failed: ' + String(e))
+      }
+      await new Promise(res => setTimeout(res, Math.floor(Math.random() * 6000) + 4000))
+    }
+  }
+
+  if (broadcastType === 'none') {
+    await bot.sendMessage(channel.id, msgs.join('\n'))
+  } else if (broadcastType === 'all') {
+    await sendListImage(true)
+  } else if (startGamingPlayers.length > 0) {
+    switch (startMode) {
+      case 'list':
+        await sendListImage(true)
+        break
+      case 'text_image':
+        await bot.sendMessage(channel.id, msgs.join('\n'))
+        await sendPlayerImages()
+        break
+      case 'image':
+        await sendPlayerImages()
+        break
+      default:
+        await bot.sendMessage(channel.id, msgs.join('\n'))
+    }
+  } else {
+    await bot.sendMessage(channel.id, msgs.join('\n'))
   }
 }
