@@ -9,6 +9,7 @@ export const inject = ['model', 'http', 'puppeteer', 'database']
 
 export interface Config {
   steamApiKey: string[]
+  enableProxy: boolean
   proxy?: string
   steamRequestInterval: number
   startBroadcastType: 'all' | 'part' | 'none' | 'list' | 'text_image' | 'image' | 'text'
@@ -31,29 +32,42 @@ export interface Config {
   }
 }
 
-export const Config: Schema<Config> = Schema.object({
-  steamApiKey: Schema.array(String).required().description('Steam API Key（支持多个）'),
-  proxy: Schema.string().description('代理地址，例如 http://127.0.0.1:7890'),
-  steamRequestInterval: Schema.number().default(300).description('轮询间隔（秒）'),
-  startBroadcastType: Schema.union(['all','part','none','list','text_image','image','text']).default('text_image').description('播报方式：可选 all（全部图片列表）、part（仅开始游戏时按后续模式）、none（仅文字），或具体开始模式 list/text_image/image/text'),
-  steamDisableBroadcastOnStartup: Schema.boolean().default(false).description('启动时禁用首次播报（仅预热缓存）'),
-  enableIpCheck: Schema.boolean().default(false).description('启用IP检测：Steam API连接失败时，检测本机外网IP（前两段，后两段隐藏为*）'),
-  fonts: Schema.object({
-    regular: Schema.string().default('fonts/MiSans-Regular.ttf'),
-    light: Schema.string().default('fonts/MiSans-Light.ttf'),
-    bold: Schema.string().default('fonts/MiSans-Bold.ttf'),
-  }).description('字体文件路径，相对于插件资源目录或绝对路径'),
-  commandAuthority: Schema.object({
-    bind: Schema.number().default(1).description('绑定命令所需权限'),
-    unbind: Schema.number().default(1).description('解绑命令所需权限'),
-    info: Schema.number().default(1).description('查看资料命令所需权限'),
-    check: Schema.number().default(1).description('查看状态命令所需权限'),
-    enable: Schema.number().default(2).description('启用播报命令所需权限'),
-    disable: Schema.number().default(2).description('禁用播报命令所需权限'),
-    update: Schema.number().default(2).description('更新群信息命令所需权限'),
-    nickname: Schema.number().default(1).description('设置昵称命令所需权限'),
-  }).description('命令权限配置'),
-})
+export const Config: Schema<Config> = Schema.intersect([
+  Schema.object({
+    steamApiKey: Schema.array(String).required().description('Steam API Key（支持多个）'),
+    enableProxy: Schema.boolean().default(false).description('启用代理'),
+  }),
+  Schema.union([
+    Schema.object({
+      enableProxy: Schema.const(true).required(),
+      proxy: Schema.string().required().description('代理地址，例如 http://127.0.0.1:7890'),
+    }),
+    Schema.object({
+      enableProxy: Schema.const(false) as Schema<boolean>,
+    }),
+  ]),
+  Schema.object({
+    steamRequestInterval: Schema.number().default(300).description('轮询间隔（秒）'),
+    startBroadcastType: Schema.union(['all', 'part', 'none', 'list', 'text_image', 'image', 'text']).default('text_image').description('播报方式：可选 all（全部图片列表）、part（仅开始游戏时按后续模式）、none（仅文字），或具体开始模式 list/text_image/image/text'),
+    steamDisableBroadcastOnStartup: Schema.boolean().default(false).description('启动时禁用首次播报（仅预热缓存）'),
+    enableIpCheck: Schema.boolean().default(false).description('启用IP检测：Steam API连接失败时，检测本机外网IP（前两段，后两段隐藏为*）'),
+    fonts: Schema.object({
+      regular: Schema.string().default('fonts/MiSans-Regular.ttf'),
+      light: Schema.string().default('fonts/MiSans-Light.ttf'),
+      bold: Schema.string().default('fonts/MiSans-Bold.ttf'),
+    }).description('字体文件路径，相对于插件资源目录或绝对路径'),
+    commandAuthority: Schema.object({
+      bind: Schema.number().default(1).description('绑定命令所需权限'),
+      unbind: Schema.number().default(1).description('解绑命令所需权限'),
+      info: Schema.number().default(1).description('查看资料命令所需权限'),
+      check: Schema.number().default(1).description('查看状态命令所需权限'),
+      enable: Schema.number().default(2).description('启用播报命令所需权限'),
+      disable: Schema.number().default(2).description('禁用播报命令所需权限'),
+      update: Schema.number().default(2).description('更新群信息命令所需权限'),
+      nickname: Schema.number().default(1).description('设置昵称命令所需权限'),
+    }).description('命令权限配置'),
+  }),
+])
 
 export const logger = new Logger('steam-info')
 
@@ -141,7 +155,7 @@ export function apply(ctx: Context, config: Config) {
         if (!session) return
         try {
           let steamId: string | null = null
-          
+
           if (target) {
             // 尝试解析@提及
             const parsed = h.parse(target)
@@ -185,12 +199,12 @@ export function apply(ctx: Context, config: Config) {
 
           const steamIds = binds.map(b => b.steamId)
           const summaries = await ctx.steam.getPlayerSummaries(steamIds)
-          
+
           if (summaries.length === 0) return session.text('.api_error')
 
           const channelInfo = await ensureChannelMeta(ctx, session)
-          const parentAvatar = channelInfo.avatar 
-            ? Buffer.from(channelInfo.avatar, 'base64') 
+          const parentAvatar = channelInfo.avatar
+            ? Buffer.from(channelInfo.avatar, 'base64')
             : await ctx.drawer.getDefaultAvatar()
           const parentName = channelInfo.name || session.channelId || 'Unknown'
 
@@ -228,28 +242,28 @@ export function apply(ctx: Context, config: Config) {
         }])
         return session.text('.disable_success')
       })
-    
+
     ctx.command('steam.update [name:string] [avatar:image]', '更新群信息', { authority: config.commandAuthority.update })
       .alias('steamupdate', '更新群信息')
       .action(async ({ session }, name, avatar) => {
-          if (!session) return
-          const img = session.elements && session.elements.find(e => e.type === 'img')
-          const imgUrl = img?.attrs?.src
-          
-          let avatarBase64 = null
-          if (imgUrl) {
-              const buffer = await ctx.http.get(imgUrl, { responseType: 'arraybuffer' })
-              avatarBase64 = Buffer.from(buffer).toString('base64')
-          }
+        if (!session) return
+        const img = session.elements && session.elements.find(e => e.type === 'img')
+        const imgUrl = img?.attrs?.src
 
-          if (!name && !avatarBase64) return session.text('.usage')
+        let avatarBase64 = null
+        if (imgUrl) {
+          const buffer = await ctx.http.get(imgUrl, { responseType: 'arraybuffer' })
+          avatarBase64 = Buffer.from(buffer).toString('base64')
+        }
 
-          const update: any = { id: session.channelId, platform: session.platform, assignee: session.selfId }
-          if (name) update.name = name
-          if (avatarBase64) update.avatar = avatarBase64
-          
-          await ctx.database.upsert('steam_channel', [update])
-          return session.text('.update_success')
+        if (!name && !avatarBase64) return session.text('.usage')
+
+        const update: any = { id: session.channelId, platform: session.platform, assignee: session.selfId }
+        if (name) update.name = name
+        if (avatarBase64) update.avatar = avatarBase64
+
+        await ctx.database.upsert('steam_channel', [update])
+        return session.text('.update_success')
       })
 
     ctx.command('steam.nickname <nickname:string>', '设置 Steam 昵称', { authority: config.commandAuthority.nickname })
@@ -259,7 +273,7 @@ export function apply(ctx: Context, config: Config) {
         if (!nickname) return session.text('.usage')
         const bind = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
         if (!bind.length) return session.text('.not_bound')
-        
+
         await ctx.database.upsert('steam_bind', [{ ...bind[0], nickname }])
         return session.text('.nickname_set', [nickname])
       })
@@ -275,7 +289,7 @@ export function apply(ctx: Context, config: Config) {
     }, config.steamRequestInterval * 1000)
 
     ctx.on('dispose', () => {
-      try { clearInterval(timer as unknown as NodeJS.Timeout) } catch {}
+      try { clearInterval(timer as unknown as NodeJS.Timeout) } catch { }
     })
   })
 }

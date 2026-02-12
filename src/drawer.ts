@@ -131,11 +131,15 @@ export class DrawService extends Service {
     `
 
     const page = await this.ctx.puppeteer.page()
-    await page.setContent(html)
-    const element = await page.$('.container')
-    const buffer = await element.screenshot({ type: 'png' })
-    await page.close()
-    return buffer
+    try {
+      await page.setContent(html)
+      const element = await page.$('.container')
+      if (!element) throw new Error('渲染失败：找不到目标元素')
+      const buffer = await element.screenshot({ type: 'png' })
+      return buffer
+    } finally {
+      await page.close()
+    }
   }
 
   async drawFriendsStatus(parentAvatar: Buffer | string, parentName: string, players: PlayerSummary[], binds: SteamBind[]): Promise<Buffer | string> {
@@ -289,11 +293,15 @@ export class DrawService extends Service {
     `
 
     const page = await this.ctx.puppeteer.page()
-    await page.setContent(html)
-    const element = await page.$('body')
-    const buffer = await element.screenshot({ type: 'png' })
-    await page.close()
-    return buffer
+    try {
+      await page.setContent(html)
+      const element = await page.$('body')
+      if (!element) throw new Error('渲染失败：找不到目标元素')
+      const buffer = await element.screenshot({ type: 'png' })
+      return buffer
+    } finally {
+      await page.close()
+    }
   }
 
   async drawPlayerStatus(profile: SteamProfile, steamId: string): Promise<Buffer | string> {
@@ -450,11 +458,15 @@ export class DrawService extends Service {
     `
 
     const page = await this.ctx.puppeteer.page()
-    await page.setContent(html)
-    const element = await page.$('body')
-    const buffer = await element.screenshot({ type: 'png' })
-    await page.close()
-    return buffer
+    try {
+      await page.setContent(html)
+      const element = await page.$('body')
+      if (!element) throw new Error('渲染失败：找不到目标元素')
+      const buffer = await element.screenshot({ type: 'png' })
+      return buffer
+    } finally {
+      await page.close()
+    }
   }
 
   async getDefaultAvatar(): Promise<Buffer | string> {
@@ -462,11 +474,15 @@ export class DrawService extends Service {
       <html><body style="margin:0;padding:0;"><div style="width:100px;height:100px;background-color:#ccc;"></div></body></html>
     `
     const page = await this.ctx.puppeteer.page()
-    await page.setContent(html)
-    const element = await page.$('div')
-    const buffer = await element.screenshot({ type: 'png' })
-    await page.close()
-    return buffer
+    try {
+      await page.setContent(html)
+      const element = await page.$('div')
+      if (!element) throw new Error('渲染失败：找不到目标元素')
+      const buffer = await element.screenshot({ type: 'png' })
+      return buffer
+    } finally {
+      await page.close()
+    }
   }
 
   private getPlayerStateOrder(p: PlayerSummary) {

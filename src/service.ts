@@ -1,6 +1,6 @@
 import { Context, Service } from 'koishi'
 import { Config } from './index'
-import cheerio from 'cheerio'
+import * as cheerio from 'cheerio'
 
 const STEAM_ID_OFFSET = BigInt('76561197960265728')
 
@@ -11,7 +11,7 @@ export interface PlayerSummary {
   avatar: string
   avatarmedium: string
   avatarfull: string
-  personastate: number 
+  personastate: number
   gameextrainfo?: string
   gameid?: string
   lastlogoff?: number
@@ -44,6 +44,8 @@ export interface Achievement {
 
 export class SteamService extends Service {
   private http: any
+  private dispatcher: any
+  private proxyFetch: any
 
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'steam', true)
@@ -52,10 +54,54 @@ export class SteamService extends Service {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36'
       }
     })
-    
-    if (config.proxy) {
-      this.http = this.http.extend({ proxy: config.proxy })
+
+    if (config.enableProxy && config.proxy) {
+      try {
+        const undici = require('undici')
+        this.dispatcher = new undici.ProxyAgent(config.proxy)
+        this.proxyFetch = undici.fetch
+        ctx.logger('steam').info(`代理已启用: ${config.proxy}`)
+      } catch (e) {
+        ctx.logger('steam').error(`创建代理失败 (请确保 Node.js >= 18): ${e}`)
+      }
     }
+  }
+
+  /** 通用 GET 请求，自动走代理（如果启用） */
+  private async proxyGet<T = any>(url: string, options?: { headers?: Record<string, string>, timeout?: number, responseType?: string, maxRedirects?: number }): Promise<T> {
+    if (!this.dispatcher || !this.proxyFetch) {
+      return this.http.get(url, options)
+    }
+
+    const headers: Record<string, string> = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36',
+      ...options?.headers,
+    }
+
+    const fetchOptions: any = {
+      headers,
+      dispatcher: this.dispatcher,
+      redirect: 'follow',
+    }
+
+    if (options?.timeout) {
+      fetchOptions.signal = AbortSignal.timeout(options.timeout)
+    }
+
+    const response = await this.proxyFetch(url, fetchOptions)
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`)
+    }
+
+    if (options?.responseType === 'text') return await response.text() as T
+    if (options?.responseType === 'arraybuffer') return await response.arrayBuffer() as unknown as T
+
+    const contentType = response.headers.get('content-type') || ''
+    if (contentType.includes('text/html') || contentType.includes('text/plain')) {
+      return await response.text() as T
+    }
+
+    return await response.json() as T
   }
 
   private gameNameCache = new Map<string, string>()
@@ -69,7 +115,7 @@ export class SteamService extends Service {
     const maxRetries = 3
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        const data = await this.http.get(`https://store.steampowered.com/api/appdetails?appids=${appid}&l=schinese`, { timeout: 10000 })
+        const data = await this.proxyGet(`https://store.steampowered.com/api/appdetails?appids=${appid}&l=schinese`, { timeout: 10000 })
         if (data?.[appid]?.success) {
           const name = data[appid].data.name
           this.gameNameCache.set(appid, name)
@@ -84,7 +130,7 @@ export class SteamService extends Service {
         }
       }
     }
-    
+
     return ''
   }
 
@@ -99,7 +145,7 @@ export class SteamService extends Service {
 
   async getPlayerSummaries(steamIds: string[]): Promise<PlayerSummary[]> {
     if (steamIds.length === 0) return []
-    
+
     const chunks: string[][] = []
     for (let i = 0; i < steamIds.length; i += 100) {
       chunks.push(steamIds.slice(i, i + 100))
@@ -111,17 +157,17 @@ export class SteamService extends Service {
       for (const key of this.config.steamApiKey) {
         try {
           const url = `http://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/?key=${key}&steamids=${chunk.join(',')}`
-          const data = await this.http.get(url)
+          const data = await this.proxyGet(url)
           if (data?.response?.players) {
             players.push(...data.response.players)
             success = true
             break
           }
         } catch (e) {
-          this.ctx.logger('steam').error(`API key ${key} failed: ${e}`)
+          this.ctx.logger('steam').error(`API key ${key} failed: ${e}${(e as any)?.cause ? ' cause: ' + (e as any).cause : ''}`)
         }
       }
-      
+
       // 如果所有key都失败且启用IP检测，执行IP检测
       if (!success && this.config.enableIpCheck) {
         await this.checkAndLogIp()
@@ -132,7 +178,7 @@ export class SteamService extends Service {
 
   private async checkAndLogIp(): Promise<void> {
     try {
-      const ip = await this.http.get('http://4.ipw.cn', { responseType: 'text' })
+      const ip = await this.proxyGet('http://4.ipw.cn', { responseType: 'text' })
       const ipStr = String(ip).trim()
       const parts = ipStr.split('.')
       if (parts.length === 4) {
@@ -142,7 +188,7 @@ export class SteamService extends Service {
         this.ctx.logger('steam').warn(`Steam API连接失败，IP检测返回: ${ipStr}`)
       }
     } catch (e) {
-      this.ctx.logger('steam').error(`IP检测失败: ${e}`)
+      this.ctx.logger('steam').error(`IP检测失败: ${e}${(e as any)?.cause ? ' cause: ' + (e as any).cause : ''}`)
     }
   }
 
@@ -155,22 +201,27 @@ export class SteamService extends Service {
 
     let html: any
     try {
-      html = await this.http.get(url, { headers, timeout: 30000, maxRedirects: 5 })
+      html = await this.proxyGet(url, { headers, timeout: 30000 })
     } catch (e) {
       this.ctx.logger('steam').error(`获取Steam资料失败 (网络错误): ${e}`)
       throw new Error(`无法连接到Steam社区: ${e}`)
     }
 
-    if (!html) {
-      this.ctx.logger('steam').error(`获取Steam资料失败: HTML为空，steamId=${steamId}`)
+    if (!html || typeof html !== 'string') {
+      this.ctx.logger('steam').error(`获取Steam资料失败: 返回内容无效 (type=${typeof html})，steamId=${steamId}`)
       throw new Error('无法获取Steam资料，可能是账户不存在或为私密')
     }
 
-    const $ = cheerio.load(html)
+    const loadFn = typeof cheerio.load === 'function' ? cheerio.load : (cheerio as any).default?.load
+    if (!loadFn) {
+      this.ctx.logger('steam').error('cheerio.load 不可用，请检查 cheerio 依赖版本')
+      throw new Error('内部错误：cheerio 加载失败')
+    }
+    const $ = loadFn(html)
 
     const player_name = $('.actual_persona_name').text().trim() || $('title').text().replace('Steam 社区 :: ', '')
     const description = $('.profile_summary').text().trim().replace(/\t/g, '')
-    
+
     let background = ''
     const bgStyle = $('.no_header.profile_page').attr('style') || ''
     const bgMatch = bgStyle.match(/background-image:\s*url\(\s*['"]?([^'" ]+)['"]?\s*\)/)
@@ -184,10 +235,10 @@ export class SteamService extends Service {
       const game_name = $(el).find('.game_name').text().trim()
       const game_image = $(el).find('.game_capsule').attr('src') || ''
       const details = $(el).find('.game_info_details').text()
-      
+
       const play_time_match = details.match(/总时数\s*([\d\.]+)\s*小时/)
       const play_time = play_time_match ? play_time_match[1] : ''
-      
+
       const last_played_match = details.match(/最后运行日期：(.*) 日/)
       const last_played = last_played_match ? `最后运行日期：${last_played_match[1]} 日` : '当前正在游戏'
 
