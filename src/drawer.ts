@@ -17,51 +17,43 @@ export class DrawService extends Service {
   }
 
   private getFontCss(): string {
-
-    let css = `
-      body { font-family: 'MiSans', sans-serif; margin: 0; padding: 0; background-color: #1e2024; color: #fff; }
-    `
-
+    let css = `body { font-family: 'MiSans', sans-serif; margin: 0; padding: 0; background-color: #1e2024; color: #fff; }`
     const loadFont = (name: string, path: string, weight: string) => {
       try {
         const fullPath = resolve(this.ctx.baseDir, path)
-        const buffer = readFileSync(fullPath)
-        const base64 = buffer.toString('base64')
-        css += `
-          @font-face {
-            font-family: '${name}';
-            src: url(data:font/ttf;base64,${base64}) format('truetype');
-            font-weight: ${weight};
-            font-style: normal;
-          }
-        `
-      } catch (e) {
-        // Font not found, ignore
-      }
+        const base64 = readFileSync(fullPath).toString('base64')
+        css += `@font-face { font-family: '${name}'; src: url(data:font/ttf;base64,${base64}) format('truetype'); font-weight: ${weight}; font-style: normal; }`
+      } catch { }
     }
 
     loadFont('MiSans', this.config.fonts.regular, 'normal')
     loadFont('MiSans', this.config.fonts.light, '300')
     loadFont('MiSans', this.config.fonts.bold, 'bold')
-
     return css
   }
 
   private imageToBase64(img: string | Buffer): string {
-    if (Buffer.isBuffer(img)) {
-      return `data:image/png;base64,${img.toString('base64')}`
+    if (Buffer.isBuffer(img)) return `data:image/png;base64,${img.toString('base64')}`
+    if (typeof img === 'string' && img.length > 200 && !img.startsWith('http') && !img.startsWith('data:')) {
+      return `data:image/png;base64,${img}`
     }
     return img
   }
 
-  /** HTML 转义，防止渲染问题 */
   private escapeHtml(text: string): string {
-    return text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;')
-      .replace(/'/g, '&#039;')
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;')
+  }
+
+  private async renderHtml(html: string, selector: string = 'body'): Promise<Buffer> {
+    const page = await this.ctx.puppeteer.page()
+    try {
+      await page.setContent(html)
+      const element = await page.$(selector)
+      if (!element) throw new Error('渲染失败：找不到目标元素')
+      return await element.screenshot({ type: 'png' })
+    } finally {
+      await page.close().catch(() => { })
+    }
   }
 
   async drawStartGaming(player: PlayerSummary, nickname?: string): Promise<Buffer | string> {
@@ -75,49 +67,16 @@ export class DrawService extends Service {
       game = '(Wallpaper Engine)'
     }
 
-    const html = `
-    <html>
-      <head>
-        <style>
-          ${this.getFontCss()}
-          .container {
-            width: 400px;
-            height: 100px;
-            display: flex;
-            align-items: center;
-            background-color: #1e2024;
-            padding: 15px;
-            box-sizing: border-box;
-          }
-          .avatar {
-            width: 66px;
-            height: 66px;
-            margin-right: 20px;
-            border-radius: 4px;
-          }
-          .info {
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-          }
-          .name {
-            font-size: 19px;
-            color: #e3ffc2;
-            margin-bottom: 4px;
-          }
-          .status {
-            font-size: 17px;
-            color: #969696;
-            margin-bottom: 4px;
-          }
-          .game {
-            font-size: 14px;
-            font-weight: bold;
-            color: #91c257;
-          }
-        </style>
-      </head>
-      <body>
+    return this.renderHtml(`
+      <html><head><style>
+        ${this.getFontCss()}
+        .container { width: 400px; height: 100px; display: flex; align-items: center; background-color: #1e2024; padding: 15px; box-sizing: border-box; }
+        .avatar { width: 66px; height: 66px; margin-right: 20px; border-radius: 4px; }
+        .info { display: flex; flex-direction: column; justify-content: center; }
+        .name { font-size: 19px; color: #e3ffc2; margin-bottom: 4px; }
+        .status { font-size: 17px; color: #969696; margin-bottom: 4px; }
+        .game { font-size: 14px; font-weight: bold; color: #91c257; }
+      </style></head><body>
         <div class="container">
           <img class="avatar" src="${avatarUrl}" />
           <div class="info">
@@ -126,36 +85,18 @@ export class DrawService extends Service {
             <div class="game">${this.escapeHtml(game)}</div>
           </div>
         </div>
-      </body>
-    </html>
-    `
-
-    const page = await this.ctx.puppeteer.page()
-    try {
-      await page.setContent(html)
-      const element = await page.$('.container')
-      if (!element) throw new Error('渲染失败：找不到目标元素')
-      const buffer = await element.screenshot({ type: 'png' })
-      return buffer
-    } finally {
-      await page.close()
-    }
+      </body></html>
+    `, '.container')
   }
 
   async drawFriendsStatus(parentAvatar: Buffer | string, parentName: string, players: PlayerSummary[], binds: SteamBind[]): Promise<Buffer | string> {
-    const sorted = [...players].sort((a, b) => {
-      const stateA = this.getPlayerStateOrder(a)
-      const stateB = this.getPlayerStateOrder(b)
-      return stateA - stateB
-    })
+    const sorted = [...players].sort((a, b) => this.getPlayerStateOrder(a) - this.getPlayerStateOrder(b))
 
     const groups = [
       { title: '游戏中', items: sorted.filter(p => p.gameextrainfo) },
       { title: '在线好友', items: sorted.filter(p => !p.gameextrainfo && p.personastate !== 0) },
       { title: '离线', items: sorted.filter(p => p.personastate === 0) }
     ].filter(g => g.items.length > 0)
-
-    const parentAvatarSrc = this.imageToBase64(parentAvatar)
 
     let listHtml = ''
     for (const group of groups) {
@@ -165,10 +106,7 @@ export class DrawService extends Service {
         const name = this.escapeHtml(bind?.nickname || player.personaname)
         const avatar = player.avatarmedium || player.avatar
 
-        let statusText = '离线'
-        let nameColor = '#656565'
-        let statusColor = '#656565'
-
+        let statusText = '离线', nameColor = '#656565', statusColor = '#656565'
         if (player.gameextrainfo) {
           statusText = this.escapeHtml(player.gameextrainfo)
           nameColor = '#91c257'
@@ -191,129 +129,47 @@ export class DrawService extends Service {
       }
     }
 
-    const html = `
-    <html>
-      <head>
-        <style>
-          ${this.getFontCss()}
-          body {
-            width: 400px;
-            background-color: #1e2024;
-          }
-          .header {
-            padding: 16px;
-            display: flex;
-            align-items: center;
-            height: 120px;
-            box-sizing: border-box;
-            background: linear-gradient(to bottom, #2b2e34 0%, #1e2024 100%); 
-          }
-          .parent-avatar {
-            width: 72px;
-            height: 72px;
-            border-radius: 4px;
-            margin-right: 16px;
-          }
-          .parent-info {
-            display: flex;
-            flex-direction: column;
-          }
-          .parent-name {
-            font-size: 20px;
-            font-weight: bold;
-            color: #6dcff6;
-            margin-bottom: 4px;
-          }
-          .parent-status {
-            font-size: 18px;
-            color: #4c91ac;
-          }
-          .search-bar {
-            height: 50px;
-            background-color: #434953;
-            display: flex;
-            align-items: center;
-            padding-left: 24px;
-            color: #b7ccd5;
-            font-size: 20px;
-          }
-          .list-container {
-            padding: 16px 0;
-          }
-          .group-title {
-            color: #c5d6d4;
-            font-size: 22px;
-            margin: 10px 22px;
-          }
-          .friend-item {
-            display: flex;
-            align-items: center;
-            height: 64px;
-            padding: 0 22px;
-          }
-          .friend-item:hover {
-            background-color: #3d4450;
-          }
-          .friend-avatar {
-            width: 50px;
-            height: 50px;
-            border-radius: 4px;
-            margin-right: 16px;
-          }
-          .friend-info {
-            display: flex;
-            flex-direction: column;
-          }
-          .friend-name {
-            font-size: 18px;
-            font-weight: bold;
-            margin-bottom: 4px;
-          }
-          .friend-status {
-            font-size: 16px;
-          }
-        </style>
-      </head>
-      <body>
+    return this.renderHtml(`
+      <html><head><style>
+        ${this.getFontCss()}
+        body { width: 400px; background-color: #1e2024; }
+        .main { background-color: #1e2024; }
+        .header { padding: 16px; display: flex; align-items: center; height: 120px; box-sizing: border-box; background: linear-gradient(to bottom, #2b2e34 0%, #1e2024 100%); }
+        .parent-avatar { width: 72px; height: 72px; border-radius: 4px; margin-right: 16px; }
+        .parent-info { display: flex; flex-direction: column; }
+        .parent-name { font-size: 20px; font-weight: bold; color: #6dcff6; margin-bottom: 4px; }
+        .parent-status { font-size: 18px; color: #4c91ac; }
+        .search-bar { height: 50px; background-color: #434953; display: flex; align-items: center; padding-left: 24px; color: #b7ccd5; font-size: 20px; }
+        .list-container { padding: 16px 0; }
+        .group-title { color: #c5d6d4; font-size: 22px; margin: 10px 22px; }
+        .friend-item { display: flex; align-items: center; height: 64px; padding: 0 22px; }
+        .friend-item:hover { background-color: #3d4450; }
+        .friend-avatar { width: 50px; height: 50px; border-radius: 4px; margin-right: 16px; }
+        .friend-info { display: flex; flex-direction: column; }
+        .friend-name { font-size: 18px; font-weight: bold; margin-bottom: 4px; }
+        .friend-status { font-size: 16px; }
+      </style></head><body>
         <div class="main">
           <div class="header">
-            <img class="parent-avatar" src="${parentAvatarSrc}" />
+            <img class="parent-avatar" src="${this.imageToBase64(parentAvatar)}" />
             <div class="parent-info">
               <div class="parent-name">${this.escapeHtml(parentName)}</div>
               <div class="parent-status">在线</div>
             </div>
           </div>
           <div class="search-bar">好友</div>
-          <div class="list-container">
-            ${listHtml}
-          </div>
+          <div class="list-container">${listHtml}</div>
         </div>
-      </body>
-    </html>
-    `
-
-    const page = await this.ctx.puppeteer.page()
-    try {
-      await page.setContent(html)
-      const element = await page.$('body')
-      if (!element) throw new Error('渲染失败：找不到目标元素')
-      const buffer = await element.screenshot({ type: 'png' })
-      return buffer
-    } finally {
-      await page.close()
-    }
+      </body></html>
+    `, 'body')
   }
 
   async drawPlayerStatus(profile: SteamProfile, steamId: string): Promise<Buffer | string> {
-    const bgSrc = this.imageToBase64(profile.background)
-    const avatarSrc = this.imageToBase64(profile.avatar)
-
     let gamesHtml = ''
     for (const game of profile.game_data) {
-      const gameImg = this.imageToBase64(game.game_image)
       gamesHtml += `
         <div class="game-row">
-          <img class="game-img" src="${gameImg}" />
+          <img class="game-img" src="${this.imageToBase64(game.game_image)}" />
           <div class="game-info">
             <div class="game-name">${this.escapeHtml(game.game_name)}</div>
             <div class="game-stats">
@@ -325,120 +181,32 @@ export class DrawService extends Service {
       `
     }
 
-    const html = `
-    <html>
-      <head>
-        <style>
-          ${this.getFontCss()}
-          body {
-            width: 960px;
-            background-color: #1b2838;
-            position: relative;
-          }
-          .bg-container {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: -1;
-            background-image: url('${bgSrc}');
-            background-size: cover;
-            background-position: center;
-          }
-          .bg-overlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            z-index: -1;
-            background-color: rgba(0, 0, 0, 0.7);
-          }
-          .content {
-            padding: 40px;
-            z-index: 1;
-          }
-          .header {
-            display: flex;
-            align-items: flex-start;
-            margin-bottom: 40px;
-          }
-          .profile-avatar {
-            width: 200px;
-            height: 200px;
-            border: 3px solid #53a4c4;
-            margin-right: 40px;
-          }
-          .profile-info {
-            flex: 1;
-          }
-          .profile-name {
-            font-size: 40px;
-            color: white;
-            margin-bottom: 10px;
-          }
-          .profile-id {
-            font-size: 20px;
-            color: #bfbfbf;
-            margin-bottom: 20px;
-          }
-          .profile-desc {
-            font-size: 22px;
-            color: #bfbfbf;
-            white-space: pre-wrap;
-            max-width: 640px;
-          }
-          .games-section {
-            margin-top: 20px;
-          }
-          .recent-header {
-            background-color: rgba(0, 0, 0, 0.5);
-            padding: 10px 20px;
-            display: flex;
-            justify-content: space-between;
-            color: white;
-            font-size: 26px;
-            margin-bottom: 10px;
-          }
-          .game-row {
-            background-color: rgba(0, 0, 0, 0.3);
-            height: 100px;
-            display: flex;
-            align-items: center;
-            padding: 10px 20px;
-            margin-bottom: 10px;
-          }
-          .game-img {
-            width: 184px;
-            height: 69px;
-            margin-right: 20px;
-          }
-          .game-info {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            justify-content: center;
-          }
-          .game-name {
-            font-size: 26px;
-            color: white;
-            margin-bottom: 8px;
-          }
-          .game-stats {
-            font-size: 20px;
-            color: #969696;
-            display: flex;
-            gap: 20px;
-          }
-        </style>
-      </head>
-      <body>
+    return this.renderHtml(`
+      <html><head><style>
+        ${this.getFontCss()}
+        body { width: 960px; background-color: #1b2838; position: relative; }
+        .bg-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; background-image: url('${this.imageToBase64(profile.background)}'); background-size: cover; background-position: center; }
+        .bg-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; background-color: rgba(0, 0, 0, 0.7); }
+        .content { padding: 40px; z-index: 1; }
+        .header { display: flex; align-items: flex-start; margin-bottom: 40px; }
+        .profile-avatar { width: 200px; height: 200px; border: 3px solid #53a4c4; margin-right: 40px; }
+        .profile-info { flex: 1; }
+        .profile-name { font-size: 40px; color: white; margin-bottom: 10px; }
+        .profile-id { font-size: 20px; color: #bfbfbf; margin-bottom: 20px; }
+        .profile-desc { font-size: 22px; color: #bfbfbf; white-space: pre-wrap; max-width: 640px; }
+        .games-section { margin-top: 20px; }
+        .recent-header { background-color: rgba(0, 0, 0, 0.5); padding: 10px 20px; display: flex; justify-content: space-between; color: white; font-size: 26px; margin-bottom: 10px; }
+        .game-row { background-color: rgba(0, 0, 0, 0.3); height: 100px; display: flex; align-items: center; padding: 10px 20px; margin-bottom: 10px; }
+        .game-img { width: 184px; height: 69px; margin-right: 20px; }
+        .game-info { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+        .game-name { font-size: 26px; color: white; margin-bottom: 8px; }
+        .game-stats { font-size: 20px; color: #969696; display: flex; gap: 20px; }
+      </style></head><body>
         <div class="bg-container"></div>
         <div class="bg-overlay"></div>
         <div class="content">
           <div class="header">
-            <img class="profile-avatar" src="${avatarSrc}" />
+            <img class="profile-avatar" src="${this.imageToBase64(profile.avatar)}" />
             <div class="profile-info">
               <div class="profile-name">${this.escapeHtml(profile.player_name)}</div>
               <div class="profile-id">ID: ${steamId}</div>
@@ -453,36 +221,12 @@ export class DrawService extends Service {
             ${gamesHtml}
           </div>
         </div>
-      </body>
-    </html>
-    `
-
-    const page = await this.ctx.puppeteer.page()
-    try {
-      await page.setContent(html)
-      const element = await page.$('body')
-      if (!element) throw new Error('渲染失败：找不到目标元素')
-      const buffer = await element.screenshot({ type: 'png' })
-      return buffer
-    } finally {
-      await page.close()
-    }
+      </body></html>
+    `, 'body')
   }
 
   async getDefaultAvatar(): Promise<Buffer | string> {
-    const html = `
-      <html><body style="margin:0;padding:0;"><div style="width:100px;height:100px;background-color:#ccc;"></div></body></html>
-    `
-    const page = await this.ctx.puppeteer.page()
-    try {
-      await page.setContent(html)
-      const element = await page.$('div')
-      if (!element) throw new Error('渲染失败：找不到目标元素')
-      const buffer = await element.screenshot({ type: 'png' })
-      return buffer
-    } finally {
-      await page.close()
-    }
+    return this.renderHtml(`<html><body style="margin:0;padding:0;"><div style="width:100px;height:100px;background-color:#ccc;"></div></body></html>`, 'div')
   }
 
   private getPlayerStateOrder(p: PlayerSummary) {
@@ -492,7 +236,6 @@ export class DrawService extends Service {
   }
 
   private getPersonaStateText(state: number) {
-    const map = ['离线', '在线', '忙碌', '离开', '打盹', '寻求交易', '寻求游戏']
-    return map[state] || '未知'
+    return ['离线', '在线', '忙碌', '离开', '打盹', '寻求交易', '寻求游戏'][state] || '未知'
   }
 }
