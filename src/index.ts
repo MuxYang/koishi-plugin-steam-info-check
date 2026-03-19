@@ -11,6 +11,11 @@ export interface Config {
   steamApiKey: string[]
   enableProxy: boolean
   proxy?: string
+  enableSteamSpeed: boolean
+  steamSpeedDomain?: string
+  steamSpeedKey?: string
+  replaceWallpaperEmoji: boolean
+  requestTimeout: number
   steamRequestInterval: number
   startBroadcastType: 'all' | 'part' | 'none' | 'list' | 'text_image' | 'image' | 'text'
   enablePushDelay: boolean
@@ -30,6 +35,19 @@ export const Config: Schema<Config> = Schema.intersect([
     Schema.object({ enableProxy: Schema.const(false) as Schema<boolean> }),
   ]),
   Schema.object({
+    enableSteamSpeed: Schema.boolean().default(false).description('启用 Steam 加速计划（非必须，需自行部署，详见本项目Github仓库）'),
+  }),
+  Schema.union([
+    Schema.object({
+      enableSteamSpeed: Schema.const(true).required(),
+      steamSpeedDomain: Schema.string().required().description('加速服务域名，例如 https://your-worker.workers.dev'),
+      steamSpeedKey: Schema.string().required().pattern(/^[0-9a-fA-F]{64}$/).description('加速服务密钥（64位十六进制字符串）'),
+    }),
+    Schema.object({ enableSteamSpeed: Schema.const(false) as Schema<boolean> }),
+  ]),
+  Schema.object({
+    replaceWallpaperEmoji: Schema.boolean().default(false).description('Wallpaper Engine 替换为"起飞"表情'),
+    requestTimeout: Schema.number().default(30000).min(5000).max(120000).description('请求超时时间（毫秒），本地网络建议 15000-30000，海外服务器建议 45000-120000'),
     steamRequestInterval: Schema.number().default(300).description('轮询间隔（秒）'),
     startBroadcastType: Schema.union(['all', 'part', 'none', 'list', 'text_image', 'image', 'text']).default('text_image').description('播报方式：可选 all（全部图片列表）、part（仅开始游戏时按后续模式）、none（仅文字），或具体开始模式 list/text_image/image/text'),
     enablePushDelay: Schema.boolean().default(true).description('是否开启多个状态改变的推送延迟'),
@@ -75,105 +93,116 @@ export function apply(ctx: Context, config: Config) {
 
   ctx.using(['steam', 'drawer'], (ctx) => {
     ctx.command('steam', 'Steam 信息')
-    ctx.command('steam.bind <steamId:string>', '绑定 Steam ID', { authority: config.commandAuthority.bind }).alias('steambind', '绑定steam').action(async ({ session }, steamId) => {
-      if (!session) return
-      if (!steamId) return session.text('.usage')
-      if (!/^[0-9]+$/.test(steamId)) return session.text('.invalid_id')
-      const targetId = await ctx.steam.getSteamId(steamId)
-      if (!targetId) return session.text('.id_not_found')
-      const existing = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
-      if (existing.length) return session.text('.already_bound')
-      await ctx.database.upsert('steam_bind', [{ userId: session.userId, channelId: session.channelId, steamId: targetId }], ['userId', 'channelId'])
-      return session.text('.bind_success', [targetId])
-    })
 
-    ctx.command('steam.unbind', '解绑 Steam ID', { authority: config.commandAuthority.unbind }).alias('steamunbind', '解绑steam').action(async ({ session }) => {
-      if (!session) return
-      const result = await ctx.database.remove('steam_bind', { userId: session.userId, channelId: session.channelId })
-      return result ? session.text('.unbind_success') : session.text('.not_bound')
-    })
+    ctx.command('steam.bind <steamId:string>', '绑定 Steam ID', { authority: config.commandAuthority.bind })
+      .alias('steambind', '绑定steam')
+      .action(async ({ session }, steamId) => {
+        if (!session || !steamId) return session?.text('.usage')
+        if (!/^[0-9]+$/.test(steamId)) return session.text('.invalid_id')
 
-    ctx.command('steam.info [target:text]', '查看 Steam 资料', { authority: config.commandAuthority.info }).alias('steaminfo', 'steam信息').action(async ({ session }, target) => {
-      if (!session) return
-      try {
-        let steamId: string | null = null
-        const atElement = session.elements?.find(e => e.type === 'at' && e.attrs?.id !== session.selfId)
-          || (target ? h.parse(target).find(el => el.type === 'at') : undefined)
+        const targetId = await ctx.steam.getSteamId(steamId)
+        if (!targetId) return session.text('.id_not_found')
 
-        if (atElement?.attrs?.id) {
-          const bind = await ctx.database.get('steam_bind', { userId: atElement.attrs.id, channelId: session.channelId })
-          if (bind.length) steamId = bind[0].steamId
-        } else if (target && /^\d+$/.test(target.trim())) {
-          steamId = await ctx.steam.getSteamId(target.trim())
-        } else {
-          const bind = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
-          if (bind.length) steamId = bind[0].steamId
+        const existing = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
+        if (existing.length) return session.text('.already_bound')
+
+        await ctx.database.upsert('steam_bind', [{ userId: session.userId, channelId: session.channelId, steamId: targetId }], ['userId', 'channelId'])
+        return session.text('.bind_success', [targetId])
+      })
+
+    ctx.command('steam.unbind', '解绑 Steam ID', { authority: config.commandAuthority.unbind })
+      .alias('steamunbind', '解绑steam')
+      .action(async ({ session }) => {
+        if (!session) return
+        const result = await ctx.database.remove('steam_bind', { userId: session.userId, channelId: session.channelId })
+        return result ? session.text('.unbind_success') : session.text('.not_bound')
+      })
+
+    ctx.command('steam.info [target:text]', '查看 Steam 资料', { authority: config.commandAuthority.info })
+      .alias('steaminfo', 'steam信息')
+      .action(async ({ session }, target) => {
+        if (!session) return
+        try {
+          const steamId = await resolveSteamId(ctx, session, target)
+          if (!steamId) return session.text('.user_not_found')
+
+          const profile = await ctx.steam.getUserData(steamId)
+          const image = await ctx.drawer.drawPlayerStatus(profile, steamId)
+          return typeof image === 'string' ? image : h.image(image, 'image/png')
+        } catch (err: any) {
+          logger.error(err)
+          return err.message || session.text('.error')
         }
-        if (!steamId) return session.text('.user_not_found')
-        const profile = await ctx.steam.getUserData(steamId)
-        const image = await ctx.drawer.drawPlayerStatus(profile, steamId)
-        return typeof image === 'string' ? image : h.image(image, 'image/png')
-      } catch (err: any) {
-        logger.error(err)
-        return err.message || session.text('.error')
-      }
-    })
+      })
 
-    ctx.command('steam.check', '查看好友在线状态', { authority: config.commandAuthority.check }).alias('steamcheck', '查steam').action(async ({ session }) => {
-      if (!session) return
-      try {
-        const binds = await ctx.database.get('steam_bind', { channelId: session.channelId })
-        if (!binds.length) return session.text('.no_binds')
-        const steamIds = binds.map(b => b.steamId)
-        const summaries = await ctx.steam.getPlayerSummaries(steamIds)
-        if (!summaries.length) return session.text('.api_error')
-        const channelInfo = await ensureChannelMeta(ctx, session)
-        const parentAvatar = channelInfo.avatar ? Buffer.from(channelInfo.avatar, 'base64') : await ctx.drawer.getDefaultAvatar()
-        const parentName = channelInfo.name || session.channelId || 'Unknown'
-        const image = await ctx.drawer.drawFriendsStatus(parentAvatar, parentName, summaries, binds)
-        return typeof image === 'string' ? image : h.image(image, 'image/png')
-      } catch (err) {
-        logger.error(err)
-        return session.text('.error')
-      }
-    })
+    ctx.command('steam.check', '查看好友在线状态', { authority: config.commandAuthority.check })
+      .alias('steamcheck', '查steam')
+      .action(async ({ session }) => {
+        if (!session) return
+        try {
+          const binds = await ctx.database.get('steam_bind', { channelId: session.channelId })
+          if (!binds.length) return session.text('.no_binds')
 
-    ctx.command('steam.enable', '启用播报', { authority: config.commandAuthority.enable }).alias('steamenable').action(async ({ session }) => {
-      if (!session) return
-      await ctx.database.upsert('steam_channel', [{ id: session.channelId, enable: true, platform: session.platform, assignee: session.selfId }])
-      return session.text('.enable_success')
-    })
+          const summaries = await ctx.steam.getPlayerSummaries(binds.map(b => b.steamId))
+          if (!summaries.length) return session.text('.api_error')
 
-    ctx.command('steam.disable', '禁用播报', { authority: config.commandAuthority.disable }).alias('steamdisable').action(async ({ session }) => {
-      if (!session) return
-      await ctx.database.upsert('steam_channel', [{ id: session.channelId, enable: false, platform: session.platform, assignee: session.selfId }])
-      return session.text('.disable_success')
-    })
+          const channelInfo = await ensureChannelMeta(ctx, session)
+          const parentAvatar = channelInfo.avatar ? Buffer.from(channelInfo.avatar, 'base64') : await ctx.drawer.getDefaultAvatar()
+          const image = await ctx.drawer.drawFriendsStatus(parentAvatar, channelInfo.name || session.channelId || 'Unknown', summaries, binds)
+          return typeof image === 'string' ? image : h.image(image, 'image/png')
+        } catch (err) {
+          logger.error(err)
+          return session.text('.error')
+        }
+      })
 
-    ctx.command('steam.update [name:string] [avatar:image]', '更新群信息', { authority: config.commandAuthority.update }).alias('steamupdate').action(async ({ session }, name, avatar) => {
-      if (!session) return
-      const imgUrl = session.elements?.find(e => e.type === 'img')?.attrs?.src
-      let avatarBase64 = null
-      if (imgUrl) {
-        const buffer = await ctx.http.get(imgUrl, { responseType: 'arraybuffer' })
-        avatarBase64 = Buffer.from(buffer).toString('base64')
-      }
-      if (!name && !avatarBase64) return session.text('.usage')
-      const update: any = { id: session.channelId, platform: session.platform, assignee: session.selfId }
-      if (name) update.name = name
-      if (avatarBase64) update.avatar = avatarBase64
-      await ctx.database.upsert('steam_channel', [update])
-      return session.text('.update_success')
-    })
+    ctx.command('steam.enable', '启用播报', { authority: config.commandAuthority.enable })
+      .alias('steamenable')
+      .action(async ({ session }) => {
+        if (!session) return
+        await ctx.database.upsert('steam_channel', [{ id: session.channelId, enable: true, platform: session.platform, assignee: session.selfId }])
+        return session.text('.enable_success')
+      })
 
-    ctx.command('steam.nickname <nickname:string>', '设置 Steam 昵称', { authority: config.commandAuthority.nickname }).alias('steamnickname').action(async ({ session }, nickname) => {
-      if (!session) return
-      if (!nickname) return session.text('.usage')
-      const bind = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
-      if (!bind.length) return session.text('.not_bound')
-      await ctx.database.upsert('steam_bind', [{ ...bind[0], nickname }])
-      return session.text('.nickname_set', [nickname])
-    })
+    ctx.command('steam.disable', '禁用播报', { authority: config.commandAuthority.disable })
+      .alias('steamdisable')
+      .action(async ({ session }) => {
+        if (!session) return
+        await ctx.database.upsert('steam_channel', [{ id: session.channelId, enable: false, platform: session.platform, assignee: session.selfId }])
+        return session.text('.disable_success')
+      })
+
+    ctx.command('steam.update [name:string] [avatar:image]', '更新群信息', { authority: config.commandAuthority.update })
+      .alias('steamupdate')
+      .action(async ({ session }, name) => {
+        if (!session) return
+        const imgUrl = session.elements?.find(e => e.type === 'img')?.attrs?.src
+        let avatarBase64: string | null = null
+
+        if (imgUrl) {
+          const buffer = await ctx.http.get(imgUrl, { responseType: 'arraybuffer' })
+          avatarBase64 = Buffer.from(buffer).toString('base64')
+        }
+
+        if (!name && !avatarBase64) return session.text('.usage')
+
+        const update: any = { id: session.channelId, platform: session.platform, assignee: session.selfId }
+        if (name) update.name = name
+        if (avatarBase64) update.avatar = avatarBase64
+        await ctx.database.upsert('steam_channel', [update])
+        return session.text('.update_success')
+      })
+
+    ctx.command('steam.nickname <nickname:string>', '设置 Steam 昵称', { authority: config.commandAuthority.nickname })
+      .alias('steamnickname')
+      .action(async ({ session }, nickname) => {
+        if (!session || !nickname) return session?.text('.usage')
+        const bind = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
+        if (!bind.length) return session.text('.not_bound')
+
+        await ctx.database.upsert('steam_bind', [{ ...bind[0], nickname }])
+        return session.text('.nickname_set', [nickname])
+      })
 
     let skipFirstBroadcast = config.steamDisableBroadcastOnStartup
     const timer = ctx.setInterval(async () => {
@@ -189,20 +218,34 @@ export function apply(ctx: Context, config: Config) {
   })
 }
 
+async function resolveSteamId(ctx: Context, session: Session, target?: string): Promise<string | null> {
+  const atElement = session.elements?.find(e => e.type === 'at' && e.attrs?.id !== session.selfId)
+    || (target ? h.parse(target).find(el => el.type === 'at') : undefined)
+
+  if (atElement?.attrs?.id) {
+    const bind = await ctx.database.get('steam_bind', { userId: atElement.attrs.id, channelId: session.channelId })
+    if (bind.length) return bind[0].steamId
+  } else if (target && /^\d+$/.test(target.trim())) {
+    return ctx.steam.getSteamId(target.trim())
+  } else {
+    const bind = await ctx.database.get('steam_bind', { userId: session.userId, channelId: session.channelId })
+    if (bind.length) return bind[0].steamId
+  }
+  return null
+}
+
 async function ensureChannelMeta(ctx: Context, session: Session) {
   const channelId = session.channelId
   const existing = await ctx.database.get('steam_channel', { id: channelId })
   const current = existing[0] || { id: channelId, enable: true, platform: session.platform, assignee: session.selfId }
-  let name = current.name || session.event?.channel?.name
 
+  let name = current.name || session.event?.channel?.name
   if (!name && session.platform?.includes('onebot') && session.bot?.internal?.getGroupInfo) {
     for (const arg of [channelId, Number(channelId), { group_id: channelId }, { group_id: Number(channelId) }]) {
       try {
         const info: any = await session.bot.internal.getGroupInfo(arg)
-        if (info && (info.group_name || info.data?.group_name || info.data?.group?.group_name || info.ret?.data?.group_name)) {
-          name = info.group_name || info.data?.group_name || info.data?.group?.group_name || info.ret?.data?.group_name
-          break
-        }
+        name = info?.group_name || info?.data?.group_name || info?.data?.group?.group_name || info?.ret?.data?.group_name
+        if (name) break
       } catch { }
     }
   }
@@ -225,11 +268,14 @@ async function ensureChannelMeta(ctx: Context, session: Session) {
 async function seedStatusCache(ctx: Context) {
   const binds = await ctx.database.get('steam_bind', {})
   if (!binds.length) return
+
   const steamIds = [...new Set(binds.map(b => b.steamId))]
   const summaries = await ctx.steam.getPlayerSummaries(steamIds)
+  const now = Date.now()
+
   for (const player of summaries) {
     statusCache.set(player.steamid, player)
-    lastSeenAt.set(player.steamid, Date.now())
+    lastSeenAt.set(player.steamid, now)
   }
 }
 
@@ -237,8 +283,8 @@ async function broadcast(ctx: Context, config: Config) {
   try {
     const channels = await ctx.database.get('steam_channel', { enable: true })
     if (!channels.length) return
-    const channelIds = channels.map(c => c.id)
-    const binds = await ctx.database.get('steam_bind', { channelId: channelIds })
+
+    const binds = await ctx.database.get('steam_bind', { channelId: channels.map(c => c.id) })
     if (!binds.length) return
 
     const steamIds = [...new Set(binds.map(b => b.steamId))]
@@ -255,11 +301,15 @@ async function broadcast(ctx: Context, config: Config) {
         const current = currentMap.get(bind.steamId)
         const old = statusCache.get(bind.steamId)
         if (!current || !old) continue
+
         const oldGame = old.gameextrainfo || null
         const newGame = current.gameextrainfo || null
         const name = bind.nickname || current.personaname
+
         let displayGameName = newGame
-        if (newGame && current.gameid) displayGameName = await ctx.steam.getLocalizedGameName(current.gameid) || newGame
+        if (newGame && current.gameid) {
+          displayGameName = await ctx.steam.getLocalizedGameName(current.gameid) || newGame
+        }
 
         const meta = playMeta.get(bind.steamId) || {}
         if (newGame && !oldGame) {
@@ -277,23 +327,28 @@ async function broadcast(ctx: Context, config: Config) {
         }
       }
 
-      if (!msgs.length) continue
-      const botKey = channel.platform && channel.assignee ? `${channel.platform}:${channel.assignee}` : undefined
-      const bot = botKey ? ctx.bots[botKey] : Object.values(ctx.bots)[0]
-      if (!bot) continue
-      await sendBroadcast(ctx, config, bot, channel, msgs, startGamingPlayers, channelBinds, currentMap)
+      if (msgs.length) {
+        const botKey = channel.platform && channel.assignee ? `${channel.platform}:${channel.assignee}` : undefined
+        const bot = botKey ? ctx.bots[botKey] : Object.values(ctx.bots)[0]
+        if (bot) await sendBroadcast(ctx, config, bot, channel, msgs, startGamingPlayers, channelBinds, currentMap)
+      }
     }
 
     for (const p of currentSummaries) {
       statusCache.set(p.steamid, p)
       lastSeenAt.set(p.steamid, now)
     }
+
     for (const [id, ts] of lastSeenAt.entries()) {
       if (now - ts > STALE_TTL_MS) {
-        lastSeenAt.delete(id); statusCache.delete(id); playMeta.delete(id)
+        lastSeenAt.delete(id)
+        statusCache.delete(id)
+        playMeta.delete(id)
       }
     }
-  } catch (err) { logger.error(`broadcast error: ${err}`) }
+  } catch (err) {
+    logger.error(`broadcast error: ${err}`)
+  }
 }
 
 async function sendBroadcast(
@@ -311,10 +366,13 @@ async function sendBroadcast(
       const parentAvatar = channel.avatar ? Buffer.from(channel.avatar, 'base64') : await ctx.drawer.getDefaultAvatar()
       const image = await ctx.drawer.drawFriendsStatus(parentAvatar, channel.name || channel.id, channelPlayers, channelBinds)
       if (image) {
-        await bot.sendMessage(channel.id, withText ? msgs.join('\n') + (typeof image === 'string' ? image : h.image(image, 'image/png')) : (typeof image === 'string' ? image : h.image(image, 'image/png')))
+        const imgElement = typeof image === 'string' ? image : h.image(image, 'image/png')
+        await bot.sendMessage(channel.id, withText ? msgs.join('\n') + imgElement : imgElement)
         return
       }
-    } catch (e) { logger.error(`broadcast draw list failed: ${e}`) }
+    } catch (e) {
+      logger.error(`broadcast draw list failed: ${e}`)
+    }
     if (withText) await bot.sendMessage(channel.id, msgs.join('\n'))
   }
 
@@ -323,8 +381,12 @@ async function sendBroadcast(
       try {
         const imgBuf = await ctx.drawer.drawStartGaming(p, p.nickname)
         if (imgBuf) await bot.sendMessage(channel.id, typeof imgBuf === 'string' ? imgBuf : h.image(imgBuf, 'image/png'))
-      } catch (e) { logger.error(`broadcast drawStartGaming failed: ${e}`) }
-      if (config.enablePushDelay) await new Promise(res => setTimeout(res, Math.floor(Math.random() * 6000) + 4000))
+      } catch (e) {
+        logger.error(`broadcast drawStartGaming failed: ${e}`)
+      }
+      if (config.enablePushDelay) {
+        await new Promise(res => setTimeout(res, Math.floor(Math.random() * 6000) + 4000))
+      }
     }
   }
 
@@ -333,10 +395,12 @@ async function sendBroadcast(
   } else if (broadcastType === 'all') {
     await sendListImage(true)
   } else if (startGamingPlayers.length > 0) {
-    if (startMode === 'list') await sendListImage(true)
-    else if (startMode === 'text_image') { await bot.sendMessage(channel.id, msgs.join('\n')); await sendPlayerImages() }
-    else if (startMode === 'image') await sendPlayerImages()
-    else await bot.sendMessage(channel.id, msgs.join('\n'))
+    switch (startMode) {
+      case 'list': await sendListImage(true); break
+      case 'text_image': await bot.sendMessage(channel.id, msgs.join('\n')); await sendPlayerImages(); break
+      case 'image': await sendPlayerImages(); break
+      default: await bot.sendMessage(channel.id, msgs.join('\n'))
+    }
   } else {
     await bot.sendMessage(channel.id, msgs.join('\n'))
   }

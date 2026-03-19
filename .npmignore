@@ -1,0 +1,72 @@
+# Source files (compiled to dist/)
+src/
+
+# Configuration files
+tsconfig.json
+tsconfig.*.json
+.eslintrc*
+.prettierrc*
+.editorconfig
+
+# Git files
+.git*
+.gitignore
+.gitattributes
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+.travis.yml
+.circleci/
+azure-pipelines.yml
+
+# Documentation and examples
+*.md
+docs/
+examples/
+CHANGELOG.md
+LICENSE
+
+# Development dependencies
+node_modules/
+yarn.lock
+package-lock.json
+pnpm-lock.yaml
+
+# IDE and editor
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+.project
+.classpath
+
+# Test and coverage
+test/
+__tests__/
+coverage/
+*.test.js
+*.spec.js
+.nyc_output/
+
+# Build and output
+.cache/
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.temp
+.temp/
+
+# Bundler artifacts
+*.tgz
+*.tar.gz
+
+# Project specific
+steam-speed*.json
+speed-config.json
+PROTOCOL.md

@@ -6,33 +6,38 @@ import { resolve } from 'path'
 import { readFileSync } from 'fs'
 
 declare module 'koishi' {
-  interface Context {
-    puppeteer: any
-  }
+  interface Context { puppeteer: any }
 }
 
+const PERSONA_STATES = ['离线', '在线', '忙碌', '离开', '打盹', '寻求交易', '寻求游戏']
+
 export class DrawService extends Service {
+  private fontCss: string | null = null
+
   constructor(ctx: Context, public config: Config) {
     super(ctx, 'drawer')
   }
 
   private getFontCss(): string {
+    if (this.fontCss) return this.fontCss
+
     let css = `body { font-family: 'MiSans', sans-serif; margin: 0; padding: 0; background-color: #1e2024; color: #fff; }`
-    const loadFont = (name: string, path: string, weight: string) => {
+    const loadFont = (path: string, weight: string) => {
       try {
-        const fullPath = resolve(this.ctx.baseDir, path)
-        const base64 = readFileSync(fullPath).toString('base64')
-        css += `@font-face { font-family: '${name}'; src: url(data:font/ttf;base64,${base64}) format('truetype'); font-weight: ${weight}; font-style: normal; }`
+        const base64 = readFileSync(resolve(this.ctx.baseDir, path)).toString('base64')
+        css += `@font-face { font-family: 'MiSans'; src: url(data:font/ttf;base64,${base64}) format('truetype'); font-weight: ${weight}; font-style: normal; }`
       } catch { }
     }
 
-    loadFont('MiSans', this.config.fonts.regular, 'normal')
-    loadFont('MiSans', this.config.fonts.light, '300')
-    loadFont('MiSans', this.config.fonts.bold, 'bold')
+    loadFont(this.config.fonts.regular, 'normal')
+    loadFont(this.config.fonts.light, '300')
+    loadFont(this.config.fonts.bold, 'bold')
+
+    this.fontCss = css
     return css
   }
 
-  private imageToBase64(img: string | Buffer): string {
+  private toBase64(img: string | Buffer): string {
     if (Buffer.isBuffer(img)) return `data:image/png;base64,${img.toString('base64')}`
     if (typeof img === 'string' && img.length > 200 && !img.startsWith('http') && !img.startsWith('data:')) {
       return `data:image/png;base64,${img}`
@@ -40,11 +45,11 @@ export class DrawService extends Service {
     return img
   }
 
-  private escapeHtml(text: string): string {
+  private escape(text: string): string {
     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#039;')
   }
 
-  private async renderHtml(html: string, selector: string = 'body'): Promise<Buffer> {
+  private async render(html: string, selector = 'body'): Promise<Buffer> {
     const page = await this.ctx.puppeteer.page()
     try {
       await page.setContent(html)
@@ -57,17 +62,16 @@ export class DrawService extends Service {
   }
 
   async drawStartGaming(player: PlayerSummary, nickname?: string): Promise<Buffer | string> {
-    const avatarUrl = player.avatarfull
     const name = nickname || player.personaname
     let game = player.gameextrainfo || 'Unknown Game'
     let status = '正在玩'
 
-    if (game === 'Wallpaper Engine' || String(player.gameid) === '431960') {
+    if (this.config.replaceWallpaperEmoji && (game === 'Wallpaper Engine' || String(player.gameid) === '431960')) {
       status = '正在🛫'
       game = '(Wallpaper Engine)'
     }
 
-    return this.renderHtml(`
+    return this.render(`
       <html><head><style>
         ${this.getFontCss()}
         .container { width: 400px; height: 100px; display: flex; align-items: center; background-color: #1e2024; padding: 15px; box-sizing: border-box; }
@@ -78,11 +82,11 @@ export class DrawService extends Service {
         .game { font-size: 14px; font-weight: bold; color: #91c257; }
       </style></head><body>
         <div class="container">
-          <img class="avatar" src="${avatarUrl}" />
+          <img class="avatar" src="${player.avatarfull}" />
           <div class="info">
-            <div class="name">${this.escapeHtml(name)}</div>
-            <div class="status">${this.escapeHtml(status)}</div>
-            <div class="game">${this.escapeHtml(game)}</div>
+            <div class="name">${this.escape(name)}</div>
+            <div class="status">${this.escape(status)}</div>
+            <div class="game">${this.escape(game)}</div>
           </div>
         </div>
       </body></html>
@@ -90,46 +94,47 @@ export class DrawService extends Service {
   }
 
   async drawFriendsStatus(parentAvatar: Buffer | string, parentName: string, players: PlayerSummary[], binds: SteamBind[]): Promise<Buffer | string> {
-    const sorted = [...players].sort((a, b) => this.getPlayerStateOrder(a) - this.getPlayerStateOrder(b))
+    const sorted = [...players].sort((a, b) => this.getOrder(a) - this.getOrder(b))
 
     const groups = [
       { title: '游戏中', items: sorted.filter(p => p.gameextrainfo) },
       { title: '在线好友', items: sorted.filter(p => !p.gameextrainfo && p.personastate !== 0) },
       { title: '离线', items: sorted.filter(p => p.personastate === 0) }
-    ].filter(g => g.items.length > 0)
+    ].filter(g => g.items.length)
 
     let listHtml = ''
-    for (const group of groups) {
-      listHtml += `<div class="group-title">${group.title} (${group.items.length})</div>`
-      for (const player of group.items) {
+    for (const { title, items } of groups) {
+      listHtml += `<div class="group-title">${title} (${items.length})</div>`
+      for (const player of items) {
         const bind = binds.find(b => b.steamId === player.steamid)
-        const name = this.escapeHtml(bind?.nickname || player.personaname)
+        const name = this.escape(bind?.nickname || player.personaname)
         const avatar = player.avatarmedium || player.avatar
 
-        let statusText = '离线', nameColor = '#656565', statusColor = '#656565'
+        let statusText: string, color: string
         if (player.gameextrainfo) {
-          statusText = this.escapeHtml(player.gameextrainfo)
-          nameColor = '#91c257'
-          statusColor = '#91c257'
+          statusText = this.escape(player.gameextrainfo)
+          color = '#91c257'
         } else if (player.personastate !== 0) {
-          statusText = this.getPersonaStateText(player.personastate)
-          nameColor = '#6dcff6'
-          statusColor = '#6dcff6'
+          statusText = PERSONA_STATES[player.personastate] || '未知'
+          color = '#6dcff6'
+        } else {
+          statusText = '离线'
+          color = '#656565'
         }
 
         listHtml += `
           <div class="friend-item">
             <img class="friend-avatar" src="${avatar}" />
             <div class="friend-info">
-              <div class="friend-name" style="color: ${nameColor}">${name}</div>
-              <div class="friend-status" style="color: ${statusColor}">${statusText}</div>
+              <div class="friend-name" style="color: ${color}">${name}</div>
+              <div class="friend-status" style="color: ${color}">${statusText}</div>
             </div>
           </div>
         `
       }
     }
 
-    return this.renderHtml(`
+    return this.render(`
       <html><head><style>
         ${this.getFontCss()}
         body { width: 400px; background-color: #1e2024; }
@@ -151,9 +156,9 @@ export class DrawService extends Service {
       </style></head><body>
         <div class="main">
           <div class="header">
-            <img class="parent-avatar" src="${this.imageToBase64(parentAvatar)}" />
+            <img class="parent-avatar" src="${this.toBase64(parentAvatar)}" />
             <div class="parent-info">
-              <div class="parent-name">${this.escapeHtml(parentName)}</div>
+              <div class="parent-name">${this.escape(parentName)}</div>
               <div class="parent-status">在线</div>
             </div>
           </div>
@@ -165,27 +170,24 @@ export class DrawService extends Service {
   }
 
   async drawPlayerStatus(profile: SteamProfile, steamId: string): Promise<Buffer | string> {
-    let gamesHtml = ''
-    for (const game of profile.game_data) {
-      gamesHtml += `
-        <div class="game-row">
-          <img class="game-img" src="${this.imageToBase64(game.game_image)}" />
-          <div class="game-info">
-            <div class="game-name">${this.escapeHtml(game.game_name)}</div>
-            <div class="game-stats">
-              <span class="play-time">${game.play_time ? `总时数 ${game.play_time} 小时` : ''}</span>
-              <span class="last-played">${this.escapeHtml(game.last_played)}</span>
-            </div>
+    const gamesHtml = profile.game_data.map(game => `
+      <div class="game-row">
+        <img class="game-img" src="${this.toBase64(game.game_image)}" />
+        <div class="game-info">
+          <div class="game-name">${this.escape(game.game_name)}</div>
+          <div class="game-stats">
+            <span class="play-time">${game.play_time ? `总时数 ${game.play_time} 小时` : ''}</span>
+            <span class="last-played">${this.escape(game.last_played)}</span>
           </div>
         </div>
-      `
-    }
+      </div>
+    `).join('')
 
-    return this.renderHtml(`
+    return this.render(`
       <html><head><style>
         ${this.getFontCss()}
         body { width: 960px; background-color: #1b2838; position: relative; }
-        .bg-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; background-image: url('${this.imageToBase64(profile.background)}'); background-size: cover; background-position: center; }
+        .bg-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; background-image: url('${this.toBase64(profile.background)}'); background-size: cover; background-position: center; }
         .bg-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; background-color: rgba(0, 0, 0, 0.7); }
         .content { padding: 40px; z-index: 1; }
         .header { display: flex; align-items: flex-start; margin-bottom: 40px; }
@@ -206,11 +208,11 @@ export class DrawService extends Service {
         <div class="bg-overlay"></div>
         <div class="content">
           <div class="header">
-            <img class="profile-avatar" src="${this.imageToBase64(profile.avatar)}" />
+            <img class="profile-avatar" src="${this.toBase64(profile.avatar)}" />
             <div class="profile-info">
-              <div class="profile-name">${this.escapeHtml(profile.player_name)}</div>
+              <div class="profile-name">${this.escape(profile.player_name)}</div>
               <div class="profile-id">ID: ${steamId}</div>
-              <div class="profile-desc">${this.escapeHtml(profile.description)}</div>
+              <div class="profile-desc">${this.escape(profile.description)}</div>
             </div>
           </div>
           <div class="games-section">
@@ -226,16 +228,12 @@ export class DrawService extends Service {
   }
 
   async getDefaultAvatar(): Promise<Buffer | string> {
-    return this.renderHtml(`<html><body style="margin:0;padding:0;"><div style="width:100px;height:100px;background-color:#ccc;"></div></body></html>`, 'div')
+    return this.render(`<html><body style="margin:0;padding:0;"><div style="width:100px;height:100px;background-color:#ccc;"></div></body></html>`, 'div')
   }
 
-  private getPlayerStateOrder(p: PlayerSummary) {
+  private getOrder(p: PlayerSummary): number {
     if (p.gameextrainfo) return 0
     if (p.personastate !== 0) return 1
     return 2
-  }
-
-  private getPersonaStateText(state: number) {
-    return ['离线', '在线', '忙碌', '离开', '打盹', '寻求交易', '寻求游戏'][state] || '未知'
   }
 }

@@ -140,3 +140,23 @@ vite.config.ts.timestamp-*
 
 # MacOS
 .DS_Store
+
+# IDE and Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+.env.local
+.env.*.local
+
+# Project specific
+# 加速计划密钥和配置（如果在本地测试）
+steam-speed*.json
+speed-config.json
