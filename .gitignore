@@ -156,7 +156,3 @@ vite.config.ts.timestamp-*
 .env.local
 .env.*.local
 
-# Project specific
-# 加速计划密钥和配置（如果在本地测试）
-steam-speed*.json
-speed-config.json

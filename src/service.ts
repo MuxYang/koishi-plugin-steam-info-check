@@ -278,6 +278,12 @@ export class SteamService extends Service {
     const player_name = $('.actual_persona_name').text().trim() || $('title').text().replace('Steam 社区 :: ', '')
     const description = $('.profile_summary').text().trim().replace(/\t/g, '')
 
+    // 新头像提取方式，优先 link[rel=image_src]，否则 meta[property=og:image]
+    let avatar = $('link[rel="image_src"]').attr('href') || '';
+    if (!avatar) {
+      avatar = $('meta[property="og:image"]').attr('content') || '';
+    }
+
     let background = ''
     const bgMatch = ($('.no_header.profile_page').attr('style') || '').match(/background-image:\s*url\(\s*['"]?([^'" ]+)['"]?\s*\)/)
     if (bgMatch) background = bgMatch[1]
@@ -312,7 +318,7 @@ export class SteamService extends Service {
     return {
       steamid: steamId,
       player_name,
-      avatar: $('.playerAvatarAutoSizeInner > img').attr('src') || '',
+      avatar,
       background,
       description,
       recent_2_week_play_time: $('.recentgame_quicklinks.recentgame_recentplaytime > div').text().trim(),
