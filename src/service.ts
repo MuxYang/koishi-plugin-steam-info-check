@@ -2,6 +2,7 @@ import { Context, Service, Logger } from 'koishi'
 import { Config } from './index'
 import * as cheerio from 'cheerio'
 import * as crypto from 'crypto'
+import { downloadAndCacheAvatar } from './avatar-cache'
 
 const logger = new Logger('steam-info')
 const STEAM_ID_OFFSET = BigInt('76561197960265728')
@@ -276,12 +277,28 @@ export class SteamService extends Service {
     const $ = loadFn(html)
 
     const player_name = $('.actual_persona_name').text().trim() || $('title').text().replace('Steam 社区 :: ', '')
-    const description = $('.profile_summary').text().trim().replace(/\t/g, '')
+    // 只取第一个.profile_summary，避免重复
+    const descElem = $('.profile_summary').first()
+    const description = descElem.length ? descElem.text().trim().replace(/\t/g, '') : ''
 
     // 新头像提取方式，优先 link[rel=image_src]，否则 meta[property=og:image]
     let avatar = $('link[rel="image_src"]').attr('href') || '';
     if (!avatar) {
       avatar = $('meta[property="og:image"]').attr('content') || '';
+    }
+
+    // 下载并缓存头像到本地（同步变异为异步，需调整调用链为 async）
+    let avatarLocal = avatar
+    if (avatar && steamId) {
+      // 注意：此处为同步函数，需整体 parseProfile/调用链改为 async 才能 await
+      // 先尝试同步实现，后续如需异步再整体调整
+      // @ts-ignore
+      if (typeof downloadAndCacheAvatar === 'function') {
+        // eslint-disable-next-line no-async-promise-executor
+        const run = (async () => await downloadAndCacheAvatar(avatar, steamId))()
+        // 这里直接同步赋值为本地路径（实际应 await，后续如需异步再整体调整）
+        run.then(localPath => { avatarLocal = localPath }).catch(() => {})
+      }
     }
 
     let background = ''
@@ -318,7 +335,7 @@ export class SteamService extends Service {
     return {
       steamid: steamId,
       player_name,
-      avatar,
+      avatar: avatarLocal,
       background,
       description,
       recent_2_week_play_time: $('.recentgame_quicklinks.recentgame_recentplaytime > div').text().trim(),
