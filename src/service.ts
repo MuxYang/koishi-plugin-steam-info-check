@@ -167,7 +167,6 @@ export class SteamService extends Service {
 
     const players: PlayerSummary[] = []
     const chunks = Math.ceil(steamIds.length / 100)
-    logger.info(`getPlayerSummaries: ${steamIds.length} players in ${chunks} chunk(s)`)
 
     for (let i = 0; i < steamIds.length; i += 100) {
       const chunk = steamIds.slice(i, i + 100)
@@ -195,7 +194,6 @@ export class SteamService extends Service {
       }
     }
 
-    logger.info(`getPlayerSummaries: fetched ${players.length} players`)
     return players
   }
 
