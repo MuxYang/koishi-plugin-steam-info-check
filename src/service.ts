@@ -206,7 +206,6 @@ export class SteamService extends Service {
       throw new Error(`加速服务域名配置错误: "${domain}" - 必须以 https:// 或 http:// 开头`)
     }
 
-    logger.info(`getUserData: ${steamId} via ${this.useSpeed ? 'Speed' : 'Direct'}`)
 
     let html = ''
     let page: any
@@ -242,7 +241,6 @@ export class SteamService extends Service {
 
       const startTime = Date.now()
       await page.goto(url, { waitUntil: 'load', timeout: this.config.requestTimeout })
-      logger.info(`getUserData: page loaded in ${Date.now() - startTime}ms`)
 
       if (mainRequestFailed) {
         const source = this.useSpeed ? '加速服务' : 'Steam 社区'
