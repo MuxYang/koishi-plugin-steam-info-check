@@ -1,0 +1,9 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "steam-speed-proxy",
+  "main": "src/index.js",
+  "compatibility_date": "2026-10-20",
+  "compatibility_flags": ["nodejs_compat"],
+  "kv_namespaces": [{ "binding": "CACHE" }],
+  "observability": { "enabled": true, "head_sampling_rate": 0.1 }
+}
