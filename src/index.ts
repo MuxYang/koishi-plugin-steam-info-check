@@ -3,6 +3,7 @@ import { SteamService, PlayerSummary } from './service'
 import { DrawService } from './drawer'
 import { SteamBind, SteamChannel } from './database'
 import zhCN from './locales/zh-CN'
+import { getGameActivity, getGameKey, getSteamAppId } from './game-status'
 
 export const name = 'steam-info'
 export const inject = ['model', 'http', 'puppeteer', 'database']
@@ -78,11 +79,11 @@ declare module 'koishi' {
 }
 
 const statusCache = new Map<string, PlayerSummary>()
-const playMeta = new Map<string, { lastLeftAt?: number, lastLeftGame?: string }>()
 const lastSeenAt = new Map<string, number>()
 const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000
 
 export function apply(ctx: Context, config: Config) {
+  const lastBroadcastGames = new Map<string, Map<string, string>>()
   ctx.i18n.define('zh-CN', zhCN)
   ctx.i18n.define('zh', zhCN)
   ctx.plugin(SteamService, config)
@@ -205,13 +206,20 @@ export function apply(ctx: Context, config: Config) {
       })
 
     let skipFirstBroadcast = config.steamDisableBroadcastOnStartup
+    let polling = false
     const timer = ctx.setInterval(async () => {
-      if (skipFirstBroadcast) {
-        await seedStatusCache(ctx)
-        skipFirstBroadcast = false
-        return
+      if (polling) return
+      polling = true
+      try {
+        if (skipFirstBroadcast) {
+          await seedStatusCache(ctx)
+          skipFirstBroadcast = false
+          return
+        }
+        await broadcast(ctx, config, lastBroadcastGames)
+      } finally {
+        polling = false
       }
-      await broadcast(ctx, config)
     }, config.steamRequestInterval * 1000)
 
     ctx.on('dispose', () => clearInterval(timer as unknown as NodeJS.Timeout))
@@ -279,7 +287,7 @@ async function seedStatusCache(ctx: Context) {
   }
 }
 
-async function broadcast(ctx: Context, config: Config) {
+async function broadcast(ctx: Context, config: Config, lastBroadcastGames: Map<string, Map<string, string>>) {
   try {
     const channels = await ctx.database.get('steam_channel', { enable: true })
     if (!channels.length) return
@@ -302,35 +310,31 @@ async function broadcast(ctx: Context, config: Config) {
         const old = statusCache.get(bind.steamId)
         if (!current || !old) continue
 
-        const oldGame = old.gameextrainfo || null
-        const newGame = current.gameextrainfo || null
+        const oldGame = getGameKey(old)
+        const newGame = getGameKey(current)
         const name = bind.nickname || current.personaname
-
-        let displayGameName = newGame
-        if (newGame && current.gameid) {
-          displayGameName = await ctx.steam.getLocalizedGameName(current.gameid) || newGame
-        }
-
-        const meta = playMeta.get(bind.steamId) || {}
-        if (newGame && !oldGame) {
-          if (!meta.lastLeftAt || meta.lastLeftGame !== newGame || (now - meta.lastLeftAt) >= 10 * 60 * 1000) {
-            msgs.push(`${name} 开始玩 ${displayGameName} 了`)
-            startGamingPlayers.push({ ...current, nickname: bind.nickname, gameextrainfo: displayGameName as string })
-          }
-          playMeta.set(bind.steamId, {})
-        } else if (newGame && oldGame && newGame !== oldGame) {
-          msgs.push(`${name} 开始玩 ${displayGameName} 了`)
-          startGamingPlayers.push({ ...current, nickname: bind.nickname, gameextrainfo: displayGameName as string })
-          playMeta.set(bind.steamId, {})
-        } else if (!newGame && oldGame) {
-          playMeta.set(bind.steamId, { lastLeftAt: now, lastLeftGame: oldGame })
+        if (newGame && newGame !== oldGame && lastBroadcastGames.get(bind.steamId)?.get(channel.id) !== newGame) {
+          const activity = getGameActivity(current)!
+          const appid = getSteamAppId(current.gameid)
+          const displayGameName = appid
+            ? await ctx.steam.getLocalizedGameName(appid) || activity.name
+            : activity.name
+          msgs.push(`${name} 开始玩${activity.isNonSteam ? '非 Steam 游戏' : ''} ${displayGameName} 了`)
+          startGamingPlayers.push({ ...current, nickname: bind.nickname, gameextrainfo: displayGameName })
         }
       }
 
       if (msgs.length) {
         const botKey = channel.platform && channel.assignee ? `${channel.platform}:${channel.assignee}` : undefined
         const bot = botKey ? ctx.bots[botKey] : Object.values(ctx.bots)[0]
-        if (bot) await sendBroadcast(ctx, config, bot, channel, msgs, startGamingPlayers, channelBinds, currentMap)
+        if (bot) {
+          await sendBroadcast(ctx, config, bot, channel, msgs, startGamingPlayers, channelBinds, currentMap)
+          for (const player of startGamingPlayers) {
+            const games = lastBroadcastGames.get(player.steamid) || new Map<string, string>()
+            games.set(channel.id, getGameKey(currentMap.get(player.steamid)!)!)
+            lastBroadcastGames.set(player.steamid, games)
+          }
+        }
       }
     }
 
@@ -343,7 +347,7 @@ async function broadcast(ctx: Context, config: Config) {
       if (now - ts > STALE_TTL_MS) {
         lastSeenAt.delete(id)
         statusCache.delete(id)
-        playMeta.delete(id)
+        lastBroadcastGames.delete(id)
       }
     }
   } catch (err) {

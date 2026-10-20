@@ -4,15 +4,32 @@
 
 Steam 好友状态播报 koishi 插件 (基于nonebot版本修改，https://github.com/zhaomaoniu/nonebot-plugin-steam-info ）
 
+## 非 Steam 游戏
+
+支持显示通过 Steam「添加非 Steam 游戏」启动的程序（例如 FL Studio）。好友状态列表和开始游戏播报会标注「非 Steam 游戏」，保留自定义名称，不查询 Steam 商店翻译；`steam.info` 也会显示社区资料页上的当前运行状态。
+
+无需额外配置。好友列表和自动播报以 Steam API 返回的活动为准，资料卡以社区公开页面为准；隐私设置或上游未返回的活动无法显示。非 Steam 游戏不会生成 Steam 游戏时数或成就记录。
+
+## 重复播报过滤
+
+每个用户在各群分别记录上一次播报的游戏；再次开始同一游戏时不重复播报，离线、短暂退出或经过较长时间都不会清空记录。播报过其他游戏后，可以再次播报原来的游戏。此机制同时适用于 Steam 和非 Steam 游戏，不影响手动查询。
+
+记录保存在内存中，重载插件或重启后重新建立；连续七天未在接口结果中出现的用户会随过期状态缓存一起清理。
+
 ## Steam 加速计划
 
 本插件支持使用自建的加速代理服务加速 Steam 社区和 API 请求。详见 [PROTOCOL.md](./PROTOCOL.md)。
+
+代理服务源码在独立分支维护，不包含在插件 npm 包中：
+
+- [C++ / Linux VPS 代理](https://github.com/MuxYang/koishi-plugin-steam-info/tree/MuxYang/steam-speed-cpp/speed-service)：systemd 部署，可由 ESA 等边缘服务终止 HTTPS。
+- [Cloudflare Workers 代理](https://github.com/MuxYang/koishi-plugin-steam-info/tree/MuxYang/steam-speed-worker)：边缘部署，保留页面资源链接替换。
 
 ### 配置
 
 需要两个参数：
 
-- **加速服务域名**：Cloudflare Worker 或其他反向代理服务的域名，例如 `https://your-worker.workers.dev`
+- **加速服务域名**：Cloudflare Worker、ESA 回源域名或其他反向代理服务的域名，例如 `https://steam.example.com`
 - **加速服务密钥**：64位十六进制字符串，由部署者生成并保存
 
 ### User-Agent 格式

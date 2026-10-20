@@ -3,6 +3,7 @@ import { Config } from './index'
 import * as cheerio from 'cheerio'
 import * as crypto from 'crypto'
 import { downloadAndCacheAvatar } from './avatar-cache'
+import { GameActivity, getSteamAppId } from './game-status'
 
 const logger = new Logger('steam-info')
 const STEAM_ID_OFFSET = BigInt('76561197960265728')
@@ -27,6 +28,7 @@ export interface SteamProfile {
   background: string | Buffer
   description: string
   recent_2_week_play_time: string
+  current_game?: GameActivity
   game_data: GameData[]
 }
 
@@ -134,7 +136,8 @@ export class SteamService extends Service {
   }
 
   async getLocalizedGameName(inputAppid: string | number): Promise<string> {
-    const appid = String(inputAppid)
+    const appid = getSteamAppId(inputAppid)
+    if (!appid) return ''
     if (this.gameNameCache.has(appid)) return this.gameNameCache.get(appid)!
 
     for (let attempt = 1; attempt <= 3; attempt++) {
@@ -330,6 +333,14 @@ export class SteamService extends Service {
       })
     })
 
+    const currentGameName = $('.profile_in_game_name').first().text().trim()
+    const currentGameHeader = $('.profile_in_game_header').first().text().trim()
+    const current_game = currentGameName ? {
+      name: currentGameName,
+      isNonSteam: /non[\s-]*steam|非\s*steam/i.test(currentGameHeader)
+        || $('.profile_in_game.nonsteam').length > 0,
+    } : undefined
+
     return {
       steamid: steamId,
       player_name,
@@ -337,6 +348,7 @@ export class SteamService extends Service {
       background,
       description,
       recent_2_week_play_time: $('.recentgame_quicklinks.recentgame_recentplaytime > div').text().trim(),
+      current_game,
       game_data
     }
   }

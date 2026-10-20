@@ -2,6 +2,7 @@ import { Context, Service } from 'koishi'
 import { Config } from './index'
 import { SteamBind } from './database'
 import { PlayerSummary, SteamProfile } from './service'
+import { getGameActivity } from './game-status'
 import { resolve } from 'path'
 import { readFileSync } from 'fs'
 
@@ -63,10 +64,11 @@ export class DrawService extends Service {
 
   async drawStartGaming(player: PlayerSummary, nickname?: string): Promise<Buffer | string> {
     const name = nickname || player.personaname
-    let game = player.gameextrainfo || 'Unknown Game'
-    let status = '正在玩'
+    const activity = getGameActivity(player)
+    let game = activity?.name || 'Unknown Game'
+    let status = activity?.isNonSteam ? '正在玩非 Steam 游戏' : '正在玩'
 
-    if (this.config.replaceWallpaperEmoji && (game === 'Wallpaper Engine' || String(player.gameid) === '431960')) {
+    if (!activity?.isNonSteam && this.config.replaceWallpaperEmoji && (game === 'Wallpaper Engine' || String(player.gameid) === '431960')) {
       status = '正在🛫'
       game = '(Wallpaper Engine)'
     }
@@ -97,9 +99,9 @@ export class DrawService extends Service {
     const sorted = [...players].sort((a, b) => this.getOrder(a) - this.getOrder(b))
 
     const groups = [
-      { title: '游戏中', items: sorted.filter(p => p.gameextrainfo) },
-      { title: '在线好友', items: sorted.filter(p => !p.gameextrainfo && p.personastate !== 0) },
-      { title: '离线', items: sorted.filter(p => p.personastate === 0) }
+      { title: '游戏中', items: sorted.filter(p => getGameActivity(p)) },
+      { title: '在线好友', items: sorted.filter(p => !getGameActivity(p) && p.personastate !== 0) },
+      { title: '离线', items: sorted.filter(p => !getGameActivity(p) && p.personastate === 0) }
     ].filter(g => g.items.length)
 
     let listHtml = ''
@@ -111,8 +113,9 @@ export class DrawService extends Service {
         const avatar = player.avatarmedium || player.avatar
 
         let statusText: string, color: string
-        if (player.gameextrainfo) {
-          statusText = this.escape(player.gameextrainfo)
+        const activity = getGameActivity(player)
+        if (activity) {
+          statusText = this.escape(`${activity.name}${activity.isNonSteam ? '（非 Steam 游戏）' : ''}`)
           color = '#91c257'
         } else if (player.personastate !== 0) {
           statusText = PERSONA_STATES[player.personastate] || '未知'
@@ -170,6 +173,12 @@ export class DrawService extends Service {
   }
 
   async drawPlayerStatus(profile: SteamProfile, steamId: string): Promise<Buffer | string> {
+    const currentGameHtml = profile.current_game ? `
+      <div class="current-game">
+        <div>${profile.current_game.isNonSteam ? '正在玩非 Steam 游戏' : '正在游戏'}</div>
+        <div class="current-game-name">${this.escape(profile.current_game.name)}</div>
+      </div>
+    ` : ''
     const gamesHtml = profile.game_data.map(game => `
       <div class="game-row">
         <img class="game-img" src="${this.toBase64(game.game_image)}" />
@@ -186,16 +195,18 @@ export class DrawService extends Service {
     return this.render(`
       <html><head><style>
         ${this.getFontCss()}
-        body { width: 960px; background-color: #1b2838; position: relative; }
-        .bg-container { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; background-image: url('${this.toBase64(profile.background)}'); background-size: cover; background-position: center; }
-        .bg-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; background-color: rgba(0, 0, 0, 0.7); }
-        .content { padding: 40px; z-index: 1; }
+        body { width: 960px; background-color: #1b2838; position: relative; isolation: isolate; }
+        .bg-container { position: absolute; inset: 0; z-index: 0; background-image: url('${this.toBase64(profile.background)}'); background-size: cover; background-position: center; }
+        .bg-overlay { position: absolute; inset: 0; z-index: 1; background-color: rgba(0, 0, 0, 0.7); }
+        .content { position: relative; z-index: 2; padding: 40px; }
         .header { display: flex; align-items: flex-start; margin-bottom: 40px; }
         .profile-avatar { width: 200px; height: 200px; border: 3px solid #53a4c4; margin-right: 40px; }
         .profile-info { flex: 1; }
         .profile-name { font-size: 40px; color: white; margin-bottom: 10px; }
         .profile-id { font-size: 20px; color: #bfbfbf; margin-bottom: 20px; }
         .profile-desc { font-size: 22px; color: #bfbfbf; white-space: pre-wrap; max-width: 640px; }
+        .current-game { margin-top: 20px; padding: 16px; background-color: rgba(0, 0, 0, 0.3); color: #91c257; font-size: 26px; overflow-wrap: anywhere; }
+        .current-game-name { margin-top: 6px; font-size: 22px; }
         .games-section { margin-top: 20px; }
         .recent-header { background-color: rgba(0, 0, 0, 0.5); padding: 10px 20px; display: flex; justify-content: space-between; color: white; font-size: 26px; margin-bottom: 10px; }
         .game-row { background-color: rgba(0, 0, 0, 0.3); height: 100px; display: flex; align-items: center; padding: 10px 20px; margin-bottom: 10px; }
@@ -213,6 +224,7 @@ export class DrawService extends Service {
               <div class="profile-name">${this.escape(profile.player_name)}</div>
               <div class="profile-id">ID: ${steamId}</div>
               <div class="profile-desc">${this.escape(profile.description)}</div>
+              ${currentGameHtml}
             </div>
           </div>
           <div class="games-section">
@@ -232,7 +244,7 @@ export class DrawService extends Service {
   }
 
   private getOrder(p: PlayerSummary): number {
-    if (p.gameextrainfo) return 0
+    if (getGameActivity(p)) return 0
     if (p.personastate !== 0) return 1
     return 2
   }

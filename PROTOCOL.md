@@ -4,6 +4,8 @@
 
 本文档描述了 Steam 加速代理服务所使用的身份验证协议。该服务充当 Steam 社区和商店 API 的反向代理，采用严格的访问控制措施防止滥用。
 
+服务端源码单独维护：[C++ / Linux VPS](https://github.com/MuxYang/koishi-plugin-steam-info/tree/MuxYang/steam-speed-cpp/speed-service) 与 [Cloudflare Workers](https://github.com/MuxYang/koishi-plugin-steam-info/tree/MuxYang/steam-speed-worker)。两者均使用本文描述的插件鉴权协议。
+
 ## 允许的端点
 
 | 代理路径 | 目标 |
