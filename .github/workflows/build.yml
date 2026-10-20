@@ -1,0 +1,20 @@
+name: C++ proxy
+on:
+  push:
+    branches: [steam-speed-cpp]
+  pull_request:
+    branches: [steam-speed-cpp]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y g++ make libssl-dev
+      - run: make test
+      - run: bash -n build-local.sh install.sh uninstall.sh
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check diagnose.cjs

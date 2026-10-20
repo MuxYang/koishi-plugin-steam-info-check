@@ -1,0 +1,7 @@
+steam-speed
+src/steam-speed
+*.exe
+dist/
+.build/
+*.env
+*-client.txt
