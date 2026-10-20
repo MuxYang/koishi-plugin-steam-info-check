@@ -22,8 +22,8 @@ Steam 好友状态播报 koishi 插件 (基于nonebot版本修改，https://gith
 
 代理服务源码在独立分支维护，不包含在插件 npm 包中：
 
-- [C++ / Linux VPS 代理](https://github.com/MuxYang/koishi-plugin-steam-info/tree/MuxYang/steam-speed-cpp/speed-service)：systemd 部署，可由 ESA 等边缘服务终止 HTTPS。
-- [Cloudflare Workers 代理](https://github.com/MuxYang/koishi-plugin-steam-info/tree/MuxYang/steam-speed-worker)：边缘部署，保留页面资源链接替换。
+- [C++ / Linux VPS 代理](https://github.com/MuxYang/koishi-plugin-steam-info-check/tree/steam-speed-cpp)：systemd 部署，可由 ESA 等边缘服务终止 HTTPS。
+- [Cloudflare Workers 代理](https://github.com/MuxYang/koishi-plugin-steam-info-check/tree/steam-speed-worker)：边缘部署，保留页面资源链接替换。
 
 ### 配置
 
